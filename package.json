@@ -1,0 +1,23 @@
+{
+  "name": "telegram-user-tool",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "telegram": "^2.26.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "openclaw": "github:openclaw/openclaw#v2026.3.24",
+    "typescript": "^5.5.3"
+  },
+  "private": true
+}

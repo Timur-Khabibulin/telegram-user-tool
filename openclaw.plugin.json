@@ -1,0 +1,10 @@
+{
+  "id": "telegram-user-tool",
+  "name": "Telegram User Tool",
+  "description": "MTProto tools for scheduled agents: read group dialogs, fetch messages, mark as read, reply.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  }
+}
