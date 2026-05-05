@@ -564,15 +564,28 @@ export default definePluginEntry({
                                 }
                                 return true;
                             })
-                            .map((m: any) => ({
-                                id: m.id,
-                                fromId: m.senderId?.toString() ?? "",
-                                fromName: (m.sender as any)?.firstName
-                                    ? `${(m.sender as any).firstName ?? ""} ${(m.sender as any).lastName ?? ""}`.trim()
-                                    : (m.sender as any)?.title ?? (m.senderId?.toString() ?? ""),
-                                text: m.text ?? m.message ?? "",
-                                date: m.date,
-                            }));
+                            .map((m: any) => {
+                                const entry: Record<string, unknown> = {
+                                    id: m.id,
+                                    fromId: m.senderId?.toString() ?? "",
+                                    fromName: (m.sender as any)?.firstName
+                                        ? `${(m.sender as any).firstName ?? ""} ${(m.sender as any).lastName ?? ""}`.trim()
+                                        : (m.sender as any)?.title ?? (m.senderId?.toString() ?? ""),
+                                    text: m.text ?? m.message ?? "",
+                                    date: m.date,
+                                };
+                                // Добавляем userAccessHash только если sender — полноценный User
+                                // (не min-объект): min=true означает неполный access_hash,
+                                // непригодный для InputPeerUser.
+                                if (
+                                    m.sender instanceof Api.User &&
+                                    m.sender.accessHash != null &&
+                                    !m.sender.min
+                                ) {
+                                    entry.userAccessHash = m.sender.accessHash.toString();
+                                }
+                                return entry;
+                            });
 
                         log.info(
                             `[telegram-user-tool] tool:telegram_get_messages — chatId=${chatId} returned ${result.length} messages`
@@ -935,6 +948,281 @@ export default definePluginEntry({
                         floodWaits,
                         results,
                     });
+                },
+            },
+            { optional: true },
+        );
+
+        // ── telegram_send_dm ──────────────────────────────────────────
+
+        api.registerTool(
+            {
+                name: "telegram_send_dm",
+                description:
+                    "Send a direct message to a Telegram user by userId and accessHash. " +
+                    "InputPeerUser is constructed explicitly — never uses getEntity. " +
+                    "Handles FLOOD_WAIT with one retry, USER_PRIVACY_RESTRICTED, and USER_DEACTIVATED. " +
+                    "When historyRecord is provided and the send succeeds, atomically writes the record to " +
+                    "dm_history and returns { ok: true, messageId, historySaved: true }. " +
+                    "On any error, dm_history is never written — no separate dm_history_insert call needed.",
+                parameters: Type.Object({
+                    userId: Type.String({
+                        description: "Numeric Telegram user ID (string)",
+                    }),
+                    accessHash: Type.String({
+                        description: "User access hash obtained from telegram_get_messages userAccessHash field",
+                    }),
+                    text: Type.String({
+                        description: "Text of the DM to send",
+                    }),
+                    agentId: Type.Optional(Type.String({
+                        description:
+                            "agentId from the Runtime section. Required when historyRecord is provided.",
+                    })),
+                    historyRecord: Type.Optional(Type.Object({
+                        userAccessHash: Type.String(),
+                        username: Type.Optional(Type.String()),
+                        triggerText: Type.String({ description: "The group message that triggered this DM" }),
+                        dmText: Type.String({ description: "The text of the DM that was sent" }),
+                        sentAt: Type.Number({ description: "Unix timestamp when the DM was sent" }),
+                        lastAgentMsgAt: Type.Number({ description: "Unix timestamp of the last agent message" }),
+                        replyCount: Type.Optional(Type.Number()),
+                        status: Type.Optional(Type.String()),
+                    }, {
+                        description:
+                            "When present, the tool writes this record to dm_history on success. " +
+                            "Eliminates the separate dm_history_insert call and the race condition where " +
+                            "the LLM could insert history before the send result is confirmed.",
+                    })),
+                }),
+
+                async execute(_id, params) {
+                    const { userId, accessHash, text, agentId, historyRecord } = params;
+                    log.info(
+                        `[telegram-user-tool] tool:telegram_send_dm called — userId=${userId} text="${text.slice(0, 50)}..."`
+                    );
+
+                    const client = await ensureClient(log);
+                    if (!client) return fail("Client not connected");
+
+                    const peer = new Api.InputPeerUser({
+                        userId: BigInt(userId),
+                        accessHash: BigInt(accessHash),
+                    });
+
+                    // Вспомогательная: извлечь кол-во секунд из "FLOOD_WAIT_X"
+                    const parseFloodWait = (msg: string): number | null => {
+                        const m = msg.match(/FLOOD_WAIT[_ ](\d+)/i);
+                        return m ? parseInt(m[1], 10) : null;
+                    };
+
+                    const sleep = (ms: number) =>
+                        new Promise<void>(resolve => setTimeout(resolve, ms));
+
+                    const trySend = async () => {
+                        const result = await client.sendMessage(peer as any, { message: text });
+                        return result;
+                    };
+
+                    // Записывает historyRecord в dm_history, только если запись была передана.
+                    // Вызывается строго ПОСЛЕ получения подтверждения от Telegram.
+                    // Ошибка записи не откатывает отправку — DM уже ушёл, поэтому логируем
+                    // предупреждение, но не возвращаем ошибку вызывающей стороне.
+                    const saveHistoryIfRequested = (messageId: number): boolean => {
+                        if (!historyRecord || !agentId) return false;
+                        try {
+                            const Database = require("better-sqlite3");
+                            const path = require("path");
+                            const os = require("os");
+                            const dbPath = path.join(os.homedir(), ".openclaw", `workspace-${agentId}`, "tg-channels.db");
+                            const db = new Database(dbPath);
+                            try {
+                                db.exec(`
+                                    CREATE TABLE IF NOT EXISTS dm_history (
+                                        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                                        userId          TEXT NOT NULL,
+                                        userAccessHash  TEXT NOT NULL,
+                                        username        TEXT,
+                                        triggerText     TEXT NOT NULL,
+                                        dmText          TEXT NOT NULL,
+                                        sentAt          INTEGER NOT NULL,
+                                        lastAgentMsgAt  INTEGER NOT NULL,
+                                        replyCount      INTEGER DEFAULT 0,
+                                        status          TEXT DEFAULT 'sent'
+                                    );
+                                    CREATE INDEX IF NOT EXISTS idx_dm_history_user_sent
+                                        ON dm_history (userId, sentAt DESC);
+                                `);
+                                db.prepare(`
+                                    INSERT INTO dm_history
+                                        (userId, userAccessHash, username, triggerText, dmText, sentAt, lastAgentMsgAt, replyCount, status)
+                                    VALUES
+                                        (@userId, @userAccessHash, @username, @triggerText, @dmText, @sentAt, @lastAgentMsgAt, @replyCount, @status)
+                                `).run({
+                                    userId,
+                                    userAccessHash: historyRecord.userAccessHash,
+                                    username: historyRecord.username ?? null,
+                                    triggerText: historyRecord.triggerText,
+                                    dmText: historyRecord.dmText,
+                                    sentAt: historyRecord.sentAt,
+                                    lastAgentMsgAt: historyRecord.lastAgentMsgAt,
+                                    replyCount: historyRecord.replyCount ?? 0,
+                                    status: historyRecord.status ?? "sent",
+                                });
+                                log.info(
+                                    `[telegram-user-tool] tool:telegram_send_dm — dm_history saved atomically for userId=${userId} messageId=${messageId}`
+                                );
+                                return true;
+                            } finally {
+                                db.close();
+                            }
+                        } catch (dbErr: any) {
+                            log.warn(
+                                `[telegram-user-tool] tool:telegram_send_dm — dm_history save failed (DM was sent): ${dbErr.message ?? dbErr}`
+                            );
+                            return false;
+                        }
+                    };
+
+                    try {
+                        try {
+                            const result = await trySend();
+                            log.info(`[telegram-user-tool] tool:telegram_send_dm — sent messageId=${result.id} to userId=${userId}`);
+                            const historySaved = saveHistoryIfRequested(result.id);
+                            return ok({ ok: true, messageId: result.id, ...(historyRecord ? { historySaved } : {}) });
+                        } catch (err: any) {
+                            const msg: string = err.message ?? String(err);
+
+                            if (msg.includes("USER_PRIVACY_RESTRICTED")) {
+                                log.warn(`[telegram-user-tool] tool:telegram_send_dm — userId=${userId} privacy_blocked`);
+                                return ok({ error: "privacy_blocked" });
+                            }
+                            if (msg.includes("USER_DEACTIVATED") || msg.includes("USER_DEACTIVATED_BAN")) {
+                                log.warn(`[telegram-user-tool] tool:telegram_send_dm — userId=${userId} deactivated`);
+                                return ok({ error: "deactivated" });
+                            }
+                            if (msg.includes("PEER_ID_INVALID")) {
+                                log.warn(`[telegram-user-tool] tool:telegram_send_dm — userId=${userId} peer_id_invalid`);
+                                return ok({ error: "peer_id_invalid" });
+                            }
+                            // PEER_FLOOD — временный бан на рассылку. Не retry, сразу стоп.
+                            // parseFloodWait не совпадает с этим кодом (нет числа), поэтому
+                            // без явной проверки он проваливался в throw → fail(), и скилл
+                            // не распознавал ошибку, записывая кандидата как sent.
+                            if (msg.includes("PEER_FLOOD")) {
+                                log.warn(`[telegram-user-tool] tool:telegram_send_dm — userId=${userId} peer_flood`);
+                                return ok({ error: "peer_flood" });
+                            }
+
+                            const waitSec = parseFloodWait(msg);
+                            if (waitSec !== null) {
+                                log.warn(
+                                    `[telegram-user-tool] tool:telegram_send_dm — FLOOD_WAIT ${waitSec}s for userId=${userId}, waiting...`
+                                );
+                                await sleep(waitSec * 1000);
+                                // Одна повторная попытка
+                                try {
+                                    const result = await trySend();
+                                    log.info(`[telegram-user-tool] tool:telegram_send_dm — retry sent messageId=${result.id} to userId=${userId}`);
+                                    const historySaved = saveHistoryIfRequested(result.id);
+                                    return ok({ ok: true, messageId: result.id, ...(historyRecord ? { historySaved } : {}) });
+                                } catch (retryErr: any) {
+                                    const retryMsg: string = retryErr.message ?? String(retryErr);
+                                    if (parseFloodWait(retryMsg) !== null) {
+                                        log.warn(`[telegram-user-tool] tool:telegram_send_dm — repeated FLOOD_WAIT for userId=${userId}`);
+                                        return ok({ error: "flood_wait" });
+                                    }
+                                    throw retryErr;
+                                }
+                            }
+
+                            throw err;
+                        }
+                    } catch (err: any) {
+                        log.error(`[telegram-user-tool] tool:telegram_send_dm — error: ${err.message ?? err}`);
+                        return fail(err);
+                    }
+                },
+            },
+            { optional: true },
+        );
+
+        // ── telegram_get_dm_replies ───────────────────────────────────
+
+        api.registerTool(
+            {
+                name: "telegram_get_dm_replies",
+                description:
+                    "For each entry in the list: construct InputPeerUser from userId + userAccessHash, " +
+                    "fetch last 20 messages from that DM conversation, " +
+                    "and return only messages sent BY the user (not the agent) with date > lastAgentMsgAt.",
+                parameters: Type.Object({
+                    entries: Type.Array(
+                        Type.Object({
+                            userId: Type.String({ description: "Numeric Telegram user ID" }),
+                            userAccessHash: Type.String({ description: "User access hash" }),
+                            lastAgentMsgAt: Type.Number({
+                                description: "Unix timestamp of the last message sent by the agent to this user",
+                            }),
+                        }),
+                        { description: "List of DM conversations to check for replies" }
+                    ),
+                }),
+
+                async execute(_id, params) {
+                    const { entries } = params;
+                    log.info(
+                        `[telegram-user-tool] tool:telegram_get_dm_replies called — ${entries.length} entries`
+                    );
+
+                    const client = await ensureClient(log);
+                    if (!client) return fail("Client not connected");
+
+                    const me = await client.getMe();
+                    const myId = me.id.toString();
+
+                    const results: Array<{
+                        userId: string;
+                        messages: Array<{ id: number; text: string; date: number }>;
+                    }> = [];
+
+                    for (const entry of entries) {
+                        const { userId, userAccessHash, lastAgentMsgAt } = entry;
+                        const peer = new Api.InputPeerUser({
+                            userId: BigInt(userId),
+                            accessHash: BigInt(userAccessHash),
+                        });
+
+                        try {
+                            const msgs = await client.getMessages(peer as any, { limit: 20 });
+                            const filtered = msgs
+                                .filter((m: any) => {
+                                    // Только сообщения от пользователя (не от агента)
+                                    const senderId = m.senderId?.toString() ?? "";
+                                    if (senderId === myId) return false;
+                                    // Только новее последнего сообщения агента
+                                    if (m.date <= lastAgentMsgAt) return false;
+                                    return true;
+                                })
+                                .map((m: any) => ({
+                                    id: m.id,
+                                    text: m.text ?? m.message ?? "",
+                                    date: m.date,
+                                }));
+
+                            results.push({ userId, messages: filtered });
+                            log.info(
+                                `[telegram-user-tool] get_dm_replies — userId=${userId} found ${filtered.length} new messages`
+                            );
+                        } catch (err: any) {
+                            log.warn(
+                                `[telegram-user-tool] get_dm_replies — userId=${userId} error: ${err.message ?? err}`
+                            );
+                            results.push({ userId, messages: [] });
+                        }
+                    }
+
+                    return ok({ results });
                 },
             },
             { optional: true },
