@@ -4,6 +4,14 @@ import { TelegramClient } from "telegram";
 import type { PluginLogger } from "../openclaw/src/plugin-sdk/core";
 import * as path from "path";
 import * as os from "os";
+import {
+    findThreadByAgentMsgId,
+    createThread,
+    updateThread,
+    expireOldThreads,
+    findReplyByReplyMsgId,
+    type ThreadMessage,
+} from "./replies-db";
 
 // ─── Constants ───────────────────────────────────────────────────────
 
@@ -19,6 +27,35 @@ interface ChannelRow {
     chatId: string;
     title: string;
     lastProcessedAt: number;
+}
+
+interface ClassifyInputMessage {
+    id: number;
+    fromId: string;
+    fromName: string;
+    text: string;
+    date: number;
+    userAccessHash?: string;
+    replyToMsgId?: number;
+}
+
+interface AgentReplyRecord {
+    msgId: number;
+    msgText: string;
+    replyMsgId: number;
+    replyText: string;
+}
+
+interface NewThreadEntry {
+    agentReplyRecord: AgentReplyRecord;
+    messages: ClassifyInputMessage[];
+}
+
+interface ThreadReplyEntry {
+    threadId: number;
+    threadStatus: string;
+    threadMessages: ThreadMessage[];
+    newMessages: ClassifyInputMessage[];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -66,27 +103,6 @@ function ensureDmCandidatesTable(db: Database.Database): void {
             ON dm_candidates (sourceChatId, msgId);
         CREATE INDEX IF NOT EXISTS idx_dm_candidates_status
             ON dm_candidates (status, score DESC);
-    `);
-}
-
-// ─── DM History table helpers ─────────────────────────────────────────
-
-function ensureDmHistoryTable(db: Database.Database): void {
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS dm_history (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            userId          TEXT NOT NULL,
-            userAccessHash  TEXT NOT NULL,
-            username        TEXT,
-            triggerText     TEXT NOT NULL,
-            dmText          TEXT NOT NULL,
-            sentAt          INTEGER NOT NULL,
-            lastAgentMsgAt  INTEGER NOT NULL,
-            replyCount      INTEGER DEFAULT 0,
-            status          TEXT DEFAULT 'sent'
-        );
-        CREATE INDEX IF NOT EXISTS idx_dm_history_user_sent
-            ON dm_history (userId, sentAt DESC);
     `);
 }
 
@@ -494,251 +510,234 @@ export function registerChannelDbTools(
         { optional: true },
     );
 
-    // ── dm_history_check_cooldown ─────────────────────────────────────
+
+    // ── tg_classify_messages ──────────────────────────────────────────
 
     api.registerTool(
         {
-            name: "dm_history_check_cooldown",
+            name: "tg_classify_messages",
             description:
-                "Check whether the 7-day DM cooldown has passed for a given userId. " +
-                "Returns { canSend: true } if no DM was sent in the last 7 days, { canSend: false } otherwise.",
+                "Classify raw messages from telegram_get_messages into three categories: " +
+                "generalMessages (no reply to the agent), newThreadMessages (first user replies to the agent's T2, grouped by replyToMsgId), " +
+                "threadReplies (continuations of existing threads, grouped by threadId, including expired threads). " +
+                "All DB lookups happen inside this tool — call it once per channel right after telegram_mark_as_read. " +
+                "Always returns all three categories (empty arrays when nothing matches).",
             parameters: Type.Object({
                 agentId: agentIdParam,
-                userId: Type.String({ description: "Telegram user ID to check" }),
+                chatId: Type.String({ description: "Telegram chat ID where the messages came from" }),
+                messages: Type.Array(
+                    Type.Object({
+                        id: Type.Number(),
+                        fromId: Type.String(),
+                        fromName: Type.String(),
+                        text: Type.String(),
+                        date: Type.Number(),
+                        userAccessHash: Type.Optional(Type.String()),
+                        replyToMsgId: Type.Optional(Type.Number()),
+                    }),
+                    { description: "Array of raw messages produced by telegram_get_messages" },
+                ),
             }),
 
-            async execute(_id: string, params: { agentId: string; userId: string }) {
-                const dbPath = resolveDbPath(params.agentId);
+            async execute(
+                _id: string,
+                params: { agentId: string; chatId: string; messages: ClassifyInputMessage[] },
+            ) {
                 log.info(
-                    `[tg-channels-db] dm_history_check_cooldown called — agentId=${params.agentId} userId=${params.userId}`
+                    `[tg-channels-db] tg_classify_messages called — agentId=${params.agentId} chatId=${params.chatId} total=${params.messages.length}`
                 );
-
-                const db = openDb(dbPath, true);
                 try {
-                    ensureDmHistoryTable(db);
-                    const cutoff = Math.floor(Date.now() / 1000) - 7 * 86400;
-                    const row = db.prepare(`
-                        SELECT COUNT(*) as cnt
-                        FROM dm_history
-                        WHERE userId = @userId AND sentAt > @cutoff
-                    `).get({ userId: params.userId, cutoff }) as { cnt: number };
+                    const generalMessages: ClassifyInputMessage[] = [];
+                    const newThreadByReplyToMsgId = new Map<number, NewThreadEntry>();
+                    const threadRepliesByThreadId = new Map<number, ThreadReplyEntry>();
 
-                    const canSend = row.cnt === 0;
-                    log.info(`[tg-channels-db] dm_history_check_cooldown — userId=${params.userId} canSend=${canSend}`);
-                    return ok({ canSend });
-                } catch (err: any) {
-                    log.error(`[tg-channels-db] dm_history_check_cooldown — error: ${err.message ?? err}`);
-                    return fail(err);
-                } finally {
-                    db.close();
-                }
-            },
-        },
-        { optional: true },
-    );
+                    for (const msg of params.messages) {
+                        if (msg.replyToMsgId === undefined || msg.replyToMsgId === null) {
+                            generalMessages.push(msg);
+                            continue;
+                        }
 
-    // ── dm_history_count_today ────────────────────────────────────────
+                        const thread = findThreadByAgentMsgId(params.agentId, params.chatId, msg.replyToMsgId);
+                        if (thread) {
+                            let entry = threadRepliesByThreadId.get(thread.id);
+                            if (!entry) {
+                                entry = {
+                                    threadId: thread.id,
+                                    threadStatus: thread.status,
+                                    threadMessages: thread.messages,
+                                    newMessages: [],
+                                };
+                                threadRepliesByThreadId.set(thread.id, entry);
+                            }
+                            entry.newMessages.push(msg);
+                            continue;
+                        }
 
-    api.registerTool(
-        {
-            name: "dm_history_count_today",
-            description:
-                "Return the count of DMs sent today (since midnight UTC). " +
-                "Used to enforce the daily sending limit.",
-            parameters: Type.Object({
-                agentId: agentIdParam,
-            }),
+                        const reply = findReplyByReplyMsgId(params.agentId, params.chatId, msg.replyToMsgId);
+                        if (reply) {
+                            let entry = newThreadByReplyToMsgId.get(msg.replyToMsgId);
+                            if (!entry) {
+                                entry = {
+                                    agentReplyRecord: {
+                                        msgId: reply.msgId,
+                                        msgText: reply.msgText ?? "",
+                                        replyMsgId: reply.replyMsgId ?? msg.replyToMsgId,
+                                        replyText: reply.replyText,
+                                    },
+                                    messages: [],
+                                };
+                                newThreadByReplyToMsgId.set(msg.replyToMsgId, entry);
+                            }
+                            entry.messages.push(msg);
+                            continue;
+                        }
 
-            async execute(_id: string, params: { agentId: string }) {
-                const dbPath = resolveDbPath(params.agentId);
-                log.info(`[tg-channels-db] dm_history_count_today called — agentId=${params.agentId}`);
+                        generalMessages.push(msg);
+                    }
 
-                const db = openDb(dbPath, true);
-                try {
-                    // Полночь UTC текущих суток: начало дня в секундах
-                    const now = new Date();
-                    const midnightUtc = Math.floor(
-                        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 1000
+                    const newThreadMessages = Array.from(newThreadByReplyToMsgId.values());
+                    const threadReplies = Array.from(threadRepliesByThreadId.values());
+
+                    log.info(
+                        `[tg-channels-db] tg_classify_messages — general=${generalMessages.length} newThreads=${newThreadMessages.length} threadReplies=${threadReplies.length}`
                     );
-                    const row = db.prepare(`
-                        SELECT COUNT(*) as cnt FROM dm_history WHERE sentAt > @midnightUtc
-                    `).get({ midnightUtc }) as { cnt: number };
-
-                    log.info(`[tg-channels-db] dm_history_count_today — count=${row.cnt}`);
-                    return ok({ count: row.cnt });
+                    return ok({ generalMessages, newThreadMessages, threadReplies });
                 } catch (err: any) {
-                    log.error(`[tg-channels-db] dm_history_count_today — error: ${err.message ?? err}`);
+                    log.error(`[tg-channels-db] tg_classify_messages — error: ${err.message ?? err}`);
                     return fail(err);
-                } finally {
-                    db.close();
                 }
             },
         },
         { optional: true },
     );
 
-    // ── dm_history_insert ─────────────────────────────────────────────
+    // ── tg_group_thread_create ────────────────────────────────────────
 
     api.registerTool(
         {
-            name: "dm_history_insert",
+            name: "tg_group_thread_create",
             description:
-                "Record a sent DM in the dm_history table. Creates the table if it does not exist. " +
-                "Fields: userId, userAccessHash, username, triggerText, dmText, sentAt, lastAgentMsgAt, replyCount, status.",
+                "Create a new group thread from the first user reply to an agent message. " +
+                "Initialises the thread with two messages: the original user message (T1) and the agent's reply (T2). " +
+                "Registers agentMsgId in group_thread_agent_msgs. Returns the new threadId.",
             parameters: Type.Object({
                 agentId: agentIdParam,
-                record: Type.Object({
-                    userId: Type.String(),
-                    userAccessHash: Type.String(),
-                    username: Type.Optional(Type.String()),
-                    triggerText: Type.String({ description: "The message that triggered this DM" }),
-                    dmText: Type.String({ description: "The text of the DM that was sent" }),
-                    sentAt: Type.Number({ description: "Unix timestamp when the DM was sent" }),
-                    lastAgentMsgAt: Type.Number({ description: "Unix timestamp of the last agent message in this DM thread" }),
-                    replyCount: Type.Optional(Type.Number()),
-                    status: Type.Optional(Type.String()),
-                }),
+                chatId: Type.String({ description: "Telegram chat ID" }),
+                startMsgId: Type.Number({ description: "Message ID of the original user message (T1)" }),
+                startMsgText: Type.String({ description: "Text of the original user message (T1)" }),
+                agentMsgId: Type.Number({ description: "Message ID of the agent's reply (T2)" }),
+                agentMsgText: Type.String({ description: "Text of the agent's reply (T2)" }),
             }),
 
-            async execute(_id: string, params: { agentId: string; record: any }) {
-                const dbPath = resolveDbPath(params.agentId);
+            async execute(
+                _id: string,
+                params: {
+                    agentId: string;
+                    chatId: string;
+                    startMsgId: number;
+                    startMsgText: string;
+                    agentMsgId: number;
+                    agentMsgText: string;
+                },
+            ) {
                 log.info(
-                    `[tg-channels-db] dm_history_insert called — agentId=${params.agentId} userId=${params.record.userId}`
+                    `[tg-channels-db] tg_group_thread_create called — agentId=${params.agentId} chatId=${params.chatId} startMsgId=${params.startMsgId}`
                 );
-
-                const db = openDb(dbPath);
                 try {
-                    ensureDmHistoryTable(db);
-                    const { userId, userAccessHash, username, triggerText, dmText, sentAt, lastAgentMsgAt, replyCount, status } = params.record;
-                    db.prepare(`
-                        INSERT INTO dm_history
-                            (userId, userAccessHash, username, triggerText, dmText, sentAt, lastAgentMsgAt, replyCount, status)
-                        VALUES
-                            (@userId, @userAccessHash, @username, @triggerText, @dmText, @sentAt, @lastAgentMsgAt, @replyCount, @status)
-                    `).run({
-                        userId,
-                        userAccessHash,
-                        username: username ?? null,
-                        triggerText,
-                        dmText,
-                        sentAt,
-                        lastAgentMsgAt,
-                        replyCount: replyCount ?? 0,
-                        status: status ?? "sent",
-                    });
+                    const messages: ThreadMessage[] = [
+                        { role: "user", msgId: params.startMsgId, text: params.startMsgText },
+                        { role: "agent", msgId: params.agentMsgId, text: params.agentMsgText },
+                    ];
+                    const threadId = createThread(
+                        params.agentId,
+                        params.chatId,
+                        params.startMsgId,
+                        messages,
+                        params.agentMsgId,
+                    );
+                    log.info(`[tg-channels-db] tg_group_thread_create — created threadId=${threadId}`);
+                    return ok({ ok: true, threadId });
+                } catch (err: any) {
+                    log.error(`[tg-channels-db] tg_group_thread_create — error: ${err.message ?? err}`);
+                    return fail(err);
+                }
+            },
+        },
+        { optional: true },
+    );
 
-                    log.info(`[tg-channels-db] dm_history_insert — done`);
+    // ── tg_group_thread_update ────────────────────────────────────────
+
+    api.registerTool(
+        {
+            name: "tg_group_thread_update",
+            description:
+                "Append new messages to an existing group thread and register the new agent message ID. " +
+                "newMessages is a JSON array of message objects to append to the existing chain. " +
+                "newAgentMsgId is the message ID of the agent's reply just sent — it will be registered in group_thread_agent_msgs.",
+            parameters: Type.Object({
+                agentId: agentIdParam,
+                threadId: Type.Number({ description: "ID of the group_threads record to update" }),
+                newMessages: Type.String({
+                    description:
+                        "JSON array of new message objects to append. Each object: " +
+                        '{ role: "user"|"agent", msgId: number, fromName?: string, fromId?: string, text: string }',
+                }),
+                newAgentMsgId: Type.Number({ description: "Message ID of the agent's reply just sent" }),
+            }),
+
+            async execute(
+                _id: string,
+                params: { agentId: string; threadId: number; newMessages: string; newAgentMsgId: number },
+            ) {
+                log.info(
+                    `[tg-channels-db] tg_group_thread_update called — agentId=${params.agentId} threadId=${params.threadId} newAgentMsgId=${params.newAgentMsgId}`
+                );
+                try {
+                    const parsed = JSON.parse(params.newMessages) as ThreadMessage[];
+                    updateThread(params.agentId, params.threadId, parsed, params.newAgentMsgId);
+                    log.info(`[tg-channels-db] tg_group_thread_update — done threadId=${params.threadId}`);
                     return ok({ ok: true });
                 } catch (err: any) {
-                    log.error(`[tg-channels-db] dm_history_insert — error: ${err.message ?? err}`);
+                    log.error(`[tg-channels-db] tg_group_thread_update — error: ${err.message ?? err}`);
                     return fail(err);
-                } finally {
-                    db.close();
                 }
             },
         },
         { optional: true },
     );
 
-    // ── dm_history_get_active ─────────────────────────────────────────
+    // ── tg_group_thread_expire ────────────────────────────────────────
 
     api.registerTool(
         {
-            name: "dm_history_get_active",
+            name: "tg_group_thread_expire",
             description:
-                "Return all dm_history records with status 'sent' or 'in_dialogue'. " +
-                "Includes all fields needed to check for replies: id, userId, userAccessHash, username, " +
-                "triggerText, dmText, sentAt, lastAgentMsgAt, replyCount, status.",
+                "Mark group threads as 'expired' if their lastActivityAt is older than olderThanSeconds seconds ago. " +
+                "Call once per run before processing thread-replies. Default: 345600 seconds (4 days).",
             parameters: Type.Object({
                 agentId: agentIdParam,
+                olderThanSeconds: Type.Optional(Type.Number({
+                    description: "Threads inactive for more than this many seconds are expired. Default: 345600 (4 days).",
+                })),
             }),
 
-            async execute(_id: string, params: { agentId: string }) {
-                const dbPath = resolveDbPath(params.agentId);
-                log.info(`[tg-channels-db] dm_history_get_active called — agentId=${params.agentId}`);
-
-                const db = openDb(dbPath, true);
-                try {
-                    const rows = db.prepare(`
-                        SELECT id, userId, userAccessHash, username, triggerText, dmText,
-                               sentAt, lastAgentMsgAt, replyCount, status
-                        FROM dm_history
-                        WHERE status IN ('sent', 'in_dialogue')
-                        ORDER BY sentAt ASC
-                    `).all();
-
-                    log.info(`[tg-channels-db] dm_history_get_active — returned ${rows.length} rows`);
-                    return ok({ entries: rows });
-                } catch (err: any) {
-                    log.error(`[tg-channels-db] dm_history_get_active — error: ${err.message ?? err}`);
-                    return fail(err);
-                } finally {
-                    db.close();
-                }
-            },
-        },
-        { optional: true },
-    );
-
-    // ── dm_history_update ─────────────────────────────────────────────
-
-    api.registerTool(
-        {
-            name: "dm_history_update",
-            description:
-                "Update selected fields of a dm_history record by id. " +
-                "Supported fields: status, replyCount, lastAgentMsgAt, username. " +
-                "Only fields present in the 'fields' object are updated.",
-            parameters: Type.Object({
-                agentId: agentIdParam,
-                id: Type.Number({ description: "Row id of the dm_history record" }),
-                fields: Type.Object({
-                    status: Type.Optional(Type.String()),
-                    replyCount: Type.Optional(Type.Number()),
-                    lastAgentMsgAt: Type.Optional(Type.Number()),
-                    username: Type.Optional(Type.String()),
-                }),
-            }),
-
-            async execute(_id: string, params: { agentId: string; id: number; fields: any }) {
-                const dbPath = resolveDbPath(params.agentId);
+            async execute(_id: string, params: { agentId: string; olderThanSeconds?: number }) {
+                const olderThanSeconds = params.olderThanSeconds ?? 345600;
                 log.info(
-                    `[tg-channels-db] dm_history_update called — agentId=${params.agentId} id=${params.id}`
+                    `[tg-channels-db] tg_group_thread_expire called — agentId=${params.agentId} olderThanSeconds=${olderThanSeconds}`
                 );
-
-                const db = openDb(dbPath);
                 try {
-                    const { fields } = params;
-                    const setClauses: string[] = [];
-                    const values: Record<string, unknown> = { id: params.id };
-
-                    if (fields.status !== undefined) { setClauses.push("status = @status"); values.status = fields.status; }
-                    if (fields.replyCount !== undefined) { setClauses.push("replyCount = @replyCount"); values.replyCount = fields.replyCount; }
-                    if (fields.lastAgentMsgAt !== undefined) { setClauses.push("lastAgentMsgAt = @lastAgentMsgAt"); values.lastAgentMsgAt = fields.lastAgentMsgAt; }
-                    if (fields.username !== undefined) { setClauses.push("username = @username"); values.username = fields.username; }
-
-                    if (setClauses.length === 0) {
-                        return ok({ ok: true, changes: 0 });
-                    }
-
-                    const result = db.prepare(
-                        `UPDATE dm_history SET ${setClauses.join(", ")} WHERE id = @id`
-                    ).run(values);
-
-                    if (result.changes === 0) {
-                        return fail(`dm_history row id=${params.id} not found`);
-                    }
-
-                    log.info(`[tg-channels-db] dm_history_update — done id=${params.id}`);
-                    return ok({ ok: true, changes: result.changes });
+                    const expired = expireOldThreads(params.agentId, olderThanSeconds);
+                    log.info(`[tg-channels-db] tg_group_thread_expire — expired ${expired} threads`);
+                    return ok({ ok: true, expired });
                 } catch (err: any) {
-                    log.error(`[tg-channels-db] dm_history_update — error: ${err.message ?? err}`);
+                    log.error(`[tg-channels-db] tg_group_thread_expire — error: ${err.message ?? err}`);
                     return fail(err);
-                } finally {
-                    db.close();
                 }
             },
         },
         { optional: true },
     );
+
 }

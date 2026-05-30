@@ -1,20 +1,20 @@
 ---
 name: dm-send
-description: "Daily DM outreach: send direct messages to top-scored candidates from dm_candidates. Use when the agent needs to run the daily DM sending routine. Triggers: 'send DMs', 'dm outreach', 'run dm-send', 'daily dm'."
+description: "Daily DM outreach: send direct messages to top-scored candidates from dm_candidates. Uses dm_threads for cooldown tracking and thread creation. Use when the agent needs to run the daily DM sending routine. Triggers: 'send DMs', 'dm outreach', 'run dm-send', 'daily dm'."
 ---
 
 # DM Send — Ежедневная отправка личных сообщений
 
 ## Цель
 
-Ежедневно отправлять DM топ-кандидатам из очереди `dm_candidates`. Отправляет не более 15 DM в день. Записывает каждую отправку в `dm_history`.
+Ежедневно отправлять DM топ-кандидатам из очереди `dm_candidates`. Отправляет не более 15 DM в день. Создаёт тред в `dm_threads` для каждой успешной отправки.
 
 
 ## Ограничения
 
-- Не более 15 DM в сутки (UTC).
+- Не более 15 DM в сутки (UTC). Считаются только **новые треды** (по `createdAt` сегодня).
 - Не более 2 DM за один прогон (`sentThisRun`).
-- Cooldown на пользователя: 7 дней.
+- Cooldown на пользователя: **14 дней** по `lastActivityAt`.
 - Пауза 30–60 секунд между отправками (только при успехе).
 
 ---
@@ -22,11 +22,11 @@ description: "Daily DM outreach: send direct messages to top-scored candidates f
 ## Основной алгоритм
 
 Выполнять **строго по шагам**:
-
+а
 ### Шаг 0 — Проверить дневной лимит
 
 ```
-dm_history_count_today(agentId: <agentId>)
+dm_threads_count_today(agentId: <agentId>)
 ```
 
 Если `count >= 15` — перейти сразу к **Шагу 6** (уведомление), затем завершить.
@@ -40,6 +40,17 @@ tg_load_account(agentId: <agentId>)
 ```
 
 Если ошибка — завершить выполнение.
+
+---
+
+### Шаг 1.5 — Заполнить peerCache
+
+```
+telegram_get_dialogs()
+```
+
+Обязательный шаг: заполняет внутренний кэш групп (chatId → InputPeer с accessHash).
+Без него `telegram_send_dm` не сможет резолвить пользователя через `InputPeerUserFromMessage`.
 
 ---
 
@@ -61,16 +72,25 @@ dm_candidates_get_pending(agentId: <agentId>, limit: 100)
 
 ---
 
-### Шаг 4 — Отфильтровать по cooldown
+### Шаг 4 — Проверить cooldown через dm_threads
 
 Для каждого кандидата:
 
 ```
-dm_history_check_cooldown(agentId: <agentId>, userId: <candidate.userId>)
+dm_threads_exists(agentId: <agentId>, userId: <candidate.userId>)
 ```
 
-- Если `canSend: false` → пометить кандидата как `skipped` (`dm_candidates_update_status`) и добавить в счётчик «пропущено».
-- Если `canSend: true` → кандидат проходит дальше.
+Обработка результата:
+
+- `{ exists: true, cooldownActive: true }` → пометить кандидата `skipped` (`dm_candidates_update_status`) и перейти к следующему. Тред ещё активен (менее 14 дней с последней активности).
+
+- `{ exists: true, cooldownActive: false }` → cooldown истёк (прошло более 14 дней). Удалить старый тред:
+  ```
+  dm_threads_delete(agentId: <agentId>, userId: <candidate.userId>)
+  ```
+  Затем кандидат проходит дальше на отправку.
+
+- `{ exists: false }` → треда нет, кандидат проходит дальше на отправку.
 
 ---
 
@@ -101,32 +121,25 @@ dm_history_check_cooldown(agentId: <agentId>, userId: <candidate.userId>)
 - На том же языке, что и сообщение пользователя
 ```
 
-#### 5b — Отправить DM (с атомарной записью в историю)
+#### 5b — Отправить DM
 
 ```
 telegram_send_dm(
-  userId:     <candidate.userId>,
-  accessHash: <candidate.userAccessHash>,
-  text:       <DM из 5a>,
-  agentId:    <agentId>,
-  historyRecord: {
-    userAccessHash: <candidate.userAccessHash>,
-    username:       null,
-    triggerText:    <candidate.msgText>,
-    dmText:         <DM из 5a>,
-    sentAt:         <текущий unix timestamp>,
-    lastAgentMsgAt: <текущий unix timestamp>,
-    replyCount:     0,
-    status:         'sent'
-  }
+  userId:  <candidate.userId>,
+  chatId:  <candidate.sourceChatId>,
+  msgId:   <candidate.msgId>,
+  text:    <DM из 5a>,
+  agentId: <agentId>
 )
 ```
 
-Инструмент записывает `dm_history` **внутри себя**, строго после получения подтверждения от Telegram. Отдельный вызов `dm_history_insert` больше **не нужен и не должен выполняться**.
+Передаём `chatId` + `msgId` (группа и сообщение, где пользователь писал) — инструмент использует `InputPeerUserFromMessage`, что устраняет `PEER_ID_INVALID` для min-сущностей.
+
+**НЕ передавать `historyRecord`** — запись треда делается отдельным вызовом на шаге 5c.
 
 Обработка результатов — действует немедленно, до любых других шагов:
 
-- `{ ok: true, messageId }` → перейти к шагу 5c (обновить статус кандидата)
+- `{ ok: true, messageId }` → перейти к шагу 5c (создать тред)
 - `{ error: 'peer_flood' }` → **немедленно прервать цикл** (не выполнять 5c), перейти к Шагу 6. PEER_FLOOD означает временный бан аккаунта на отправку DM. Оставить статус кандидата `pending`.
 - `{ error: 'flood_wait' }` → увеличить `floodErrors` на 1; если `floodErrors >= 5` — прервать цикл, перейти к Шагу 6; иначе — пропустить этого кандидата (не выполнять 5c), перейти к следующему
 - `{ error: 'privacy_blocked' }` → вызвать `dm_candidates_update_status(status: 'privacy_blocked')`, не выполнять 5c, перейти к следующему кандидату
@@ -134,16 +147,42 @@ telegram_send_dm(
 - `{ error: 'peer_id_invalid' }` → вызвать `dm_candidates_update_status(status: 'skipped')`, не выполнять 5c, перейти к следующему кандидату **без паузы**. Не считать за успешную отправку. `sentThisRun` не увеличивать.
 - Любой другой `{ error: '...' }` → вызвать `dm_candidates_update_status(status: 'skipped')`, не выполнять 5c, перейти к следующему кандидату. Не считать за успешную отправку.
 
-#### 5c — Обновить статус кандидата (только после `{ ok: true }`)
+#### 5c — Создать тред (только после `{ ok: true }`)
+
+```
+dm_threads_create(
+  agentId:        <agentId>,
+  userId:         <candidate.userId>,
+  userAccessHash: <candidate.userAccessHash>,
+  userName:       null,
+  fromChatId:     <candidate.sourceChatId>,
+  triggerMessage: <candidate.msgText>,
+  firstMessage: {
+    role:   "agent",
+    msgId:  <messageId из ответа telegram_send_dm>,
+    text:   <DM из 5a>,
+    sentAt: <текущий unix timestamp>
+  }
+)
+```
+
+#### 5d — Обновить статус кандидата (только после 5c)
 
 ```
 dm_candidates_update_status(agentId: <agentId>, id: <candidate.id>, status: 'sent')
 ```
 
-#### 5d — Пауза (только после успешной отправки)
+Увеличить `sentThisRun` и `sentToday` на 1.
 
-Подождать **30–60 секунд** (случайно) перед следующей итерацией. Выполняется только при `ok: true` (шаги 5a–5c). При любой ошибке — переходить к следующему кандидату без паузы.
+#### 5e — Пауза (только после успешной отправки)
 
+Подождать **30–60 секунд** (случайно) перед следующей итерацией. Выполняется только при `ok: true` (шаги 5a–5d). При любой ошибке — переходить к следующему кандидату без паузы.
+
+---
+
+### Шаг 6 — Итоговое уведомление
+
+Отправить сообщение в Saved Messages с итогами прогона.
 
 ---
 
@@ -151,10 +190,13 @@ dm_candidates_update_status(agentId: <agentId>, id: <candidate.id>, status: 'sen
 
 | Инструмент | Шаг | Файл |
 |------------|-----|------|
-| `dm_history_count_today` | 0 | channels-db.ts |
+| `dm_threads_count_today` | 0 | dm-threads-db.ts |
 | `tg_load_account` | 1 | index.ts |
+| `telegram_get_dialogs` | 1.5 | index.ts |
 | `dm_candidates_expire_old` | 2 | channels-db.ts |
 | `dm_candidates_get_pending` | 3 | channels-db.ts |
-| `dm_history_check_cooldown` | 4 | channels-db.ts |
-| `dm_candidates_update_status` | 4, 5c | channels-db.ts |
-| `telegram_send_dm` | 5b | index.ts — записывает dm_history атомарно при успехе |
+| `dm_threads_exists` | 4 | dm-threads-db.ts |
+| `dm_threads_delete` | 4 | dm-threads-db.ts |
+| `dm_candidates_update_status` | 4, 5d | channels-db.ts |
+| `telegram_send_dm` | 5b | index.ts |
+| `dm_threads_create` | 5c | dm-threads-db.ts |

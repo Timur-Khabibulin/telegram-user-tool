@@ -1,22 +1,22 @@
 ---
 name: dm-replies
-description: "Process incoming DM replies and continue dialogue up to 2 exchanges. Use when the agent needs to check for and respond to replies in active DM conversations. Triggers: 'check dm replies', 'process dm replies', 'reply to dms', 'dm dialogue', 'run dm-replies'."
+description: "Process incoming DM replies using push-model: detect unread DMs via telegram_get_dm_dialogs, match with dm_threads, continue dialogue with full context. Use when the agent needs to check for and respond to replies in active DM conversations. Triggers: 'check dm replies', 'process dm replies', 'reply to dms', 'dm dialogue', 'run dm-replies'."
 ---
 
 # DM Replies — Обработка входящих ответов на DM
 
 ## Цель
 
-Проверять входящие ответы в активных DM-диалогах и продолжать диалог до 2 обменов (агент → пользователь → агент → пользователь → агент). Работает только в дневные часы UTC+5.
+Проверять входящие ответы в DM-диалогах через push-модель: запрашивать у Telegram список личных чатов с непрочитанными сообщениями, матчить с `dm_threads`, и продолжать диалог с полным контекстом переписки. Работает только в дневные часы UTC+5.
 
 ---
 
 ## Ограничения
 
 - Работает только в период **08:00–01:00 UTC+5** (Екатеринбург / Астана).
-- Диалог продолжается максимум до **2 ответов агента** (replyCount 0→1→2, затем status→done).
-- Без ответа от пользователя более **48 часов** → статус переводится в `done`.
-- Негативный тон (определяется LLM) → агент не отвечает, status→done.
+- Нет искусственного лимита ответов — диалог продолжается пока пользователь пишет.
+- Cooldown тредов: 14 дней по `lastActivityAt` (управляется на стороне `dm-send`).
+- Негативный тон (определяется LLM) → агент не отвечает, mark_as_read.
 
 ---
 
@@ -42,146 +42,159 @@ tg_load_account(agentId: <agentId>)
 
 ---
 
-### Шаг 2 — Получить активные диалоги
+### Шаг 2 — Получить DM-чаты с непрочитанными сообщениями
 
 ```
-dm_history_get_active(agentId: <agentId>)
+telegram_get_dm_dialogs()
 ```
 
-Результат: список записей со статусом `sent` или `in_dialogue`.
+Результат: `{ dms: [{ userId, accessHash, userName, firstName, unreadCount, readInboxMaxId }] }`
 
-Если список пустой — завершить выполнение.
+Этот инструмент также заполняет `peerCache` записью `InputPeerUser` для каждого возвращённого пользователя.
+
+Если `dms` пуст — перейти к **Шагу 5** (уведомление), затем завершить.
 
 ---
 
-### Шаг 3 — Получить новые ответы пользователей
+### Шаг 3 — Найти треды для пользователей с непрочитанными
 
 ```
-telegram_get_dm_replies(
-  entries: [
-    {
-      userId:        <entry.userId>,
-      userAccessHash: <entry.userAccessHash>,
-      lastAgentMsgAt: <entry.lastAgentMsgAt>
-    },
+dm_threads_get_by_users(
+  agentId: <agentId>,
+  users: [
+    { userId: "<userId>", accessHash: "<accessHash>", userName: "<userName>" },
     ...
   ]
 )
 ```
 
-Результат: `{ results: [{ userId, messages: [{ id, text, date }] }] }`
+Передать данные из каждого элемента `dms` из Шага 2.
+
+Результат: `{ threads: [...], notFound: [userId, ...] }`
+
+- `notFound` — игнорировать. Это DM от пользователей, для которых нет треда в `dm_threads` (т.е. не наш пользователь, DM не через `dm-send`). Тред создаётся только через скилл `dm-send`.
+
+- Если `threads` пуст — перейти к **Шагу 5** (уведомление), затем завершить.
 
 ---
 
-### Шаг 4 — Обработать каждый диалог
+### Шаг 4 — Обработать каждый тред
 
-Для каждой записи из `dm_history_get_active`, сопоставить с ответами из Шага 3:
+Для каждого треда из `threads` (Шаг 3):
 
-#### 4a — Первый ответ пользователя (status = 'sent', replyCount = 0)
+#### 4.1 — Получить новые сообщения
 
-**Условие:** пользователь прислал хотя бы одно новое сообщение.
-
-Проверить тональность (LLM):
+Определить `lastMsgId` — `msgId` последнего сообщения из `thread.messages` (JSON массив). Это будет `minId` для запроса.
 
 ```
-Оцени тональность следующего сообщения: позитивная/нейтральная или негативная/агрессивная?
+telegram_get_messages(
+  chatId: <thread.userId>,
+  minId:  <lastMsgId>
+)
+```
+
+Результат: список новых сообщений от пользователя (после последнего известного сообщения).
+
+Если новых сообщений нет — перейти к следующему треду.
+
+#### 4.2 — Sentiment analysis (LLM)
+
+Оценить тональность **последнего** сообщения пользователя:
+
+```
+Оцени тональность последнего сообщения пользователя.
 Верни JSON: { "sentiment": "positive" | "negative" }
 
-Сообщение: "<текст последнего ответа пользователя>"
+Позитивное/нейтральное — интерес, вопрос, согласие, продолжение разговора.
+Негативное — агрессия, просьба не писать, оскорбления, "спам", "отпишись".
+
+Сообщение: "<текст последнего сообщения пользователя>"
 ```
 
-- Если `sentiment = 'negative'` → `dm_history_update(agentId, id, { status: 'done' })`, не отвечать.
-- Если `sentiment = 'positive'` → сгенерировать и отправить ответ агента:
+- Если `sentiment = "negative"`:
+  ```
+  telegram_mark_as_read(chatId: <thread.userId>)
+  ```
+  Перейти к следующему треду. Тред **не удаляется** — cooldown продолжает работать.
+
+- Если `sentiment = "positive"` → продолжить.
+
+#### 4.3 — Сгенерировать ответ (LLM)
+
+Передать LLM полный контекст переписки:
 
 ```
-Напиши ответ на это сообщение в личной переписке Telegram.
-Контекст — ты ранее написал этому пользователю: "<entry.dmText>"
-Пользователь ответил: "<текст ответа пользователя>"
+Напиши ответ на сообщение пользователя в личной переписке Telegram.
+
+Контекст — пользователь написал в групповом чате:
+"<thread.triggerMessage>"
+
+История переписки (от старых к новым):
+<thread.messages — до 50 сообщений в формате "role: text">
+
+Новые сообщения пользователя:
+<список новых сообщений из шага 4.1>
 
 Требования:
-- Продолжи диалог естественно
-- Задай уточняющий вопрос или опиши свой опыт исходя из своей личности
+- Продолжи диалог естественно, учитывая всю историю
+- Стиль возьми из своей личности
+- Задай уточняющий вопрос или опиши свой опыт
 - До 3 предложений, на языке пользователя
 ```
 
-```
-telegram_send_dm(
-  userId:     <entry.userId>,
-  accessHash: <entry.userAccessHash>,
-  text:       <ответ агента>
-)
-```
-
-При успехе:
-
-```
-dm_history_update(
-  agentId: <agentId>,
-  id:      <entry.id>,
-  fields: {
-    status:        'in_dialogue',
-    replyCount:    1,
-    lastAgentMsgAt: <текущий unix timestamp>
-  }
-)
-```
-
-#### 4b — Второй ответ пользователя (status = 'in_dialogue', replyCount = 1)
-
-**Условие:** пользователь прислал хотя бы одно новое сообщение.
-
-Проверить тональность (LLM) — аналогично 4a.
-
-- Если `sentiment = 'negative'` → `dm_history_update(agentId, id, { status: 'done' })`, не отвечать.
-- Если `sentiment = 'positive'` → сгенерировать финальный ответ:
-
-```
-Напиши финальный ответ в личной переписке Telegram.
-Контекст диалога:
-- Ты написал первым: "<entry.dmText>"
-- Пользователь ответил (первый раз): "<первый ответ>"
-- Ты ответил: "<ответ агента после 4a>"
-- Пользователь ответил (второй раз): "<текст последнего ответа>"
-
-Требования:
-- Завершающий, естественный
-- До 4 предложений, на языке пользователя
-```
+#### 4.4 — Отправить ответ
 
 ```
 telegram_send_dm(
-  userId:     <entry.userId>,
-  accessHash: <entry.userAccessHash>,
-  text:       <финальный ответ>
+  userId: <thread.userId>,
+  text:   <ответ из 4.3>
 )
 ```
 
-При успехе:
+Обработка ошибок:
+
+- `{ ok: true, messageId }` → продолжить к 4.5
+- `{ error: 'privacy_blocked' }` → `telegram_mark_as_read(chatId: <thread.userId>)`, перейти к следующему треду (тред сохраняется)
+- `{ error: 'flood_wait' }` → **немедленно прервать прогон** (перейти к Шагу 5)
+- `{ error: 'peer_id_invalid' }` → `telegram_mark_as_read(chatId: <thread.userId>)`, перейти к следующему треду. `accessHash` обновится на следующем прогоне через `dm_threads_get_by_users`.
+- Любая другая ошибка → `telegram_mark_as_read(chatId: <thread.userId>)`, перейти к следующему треду
+
+#### 4.5 — Обновить тред
+
+Записать **все** новые сообщения (и от пользователя, и агента) в тред:
 
 ```
-dm_history_update(
+dm_threads_update_msgs(
   agentId: <agentId>,
-  id:      <entry.id>,
-  fields: {
-    status:        'done',
-    replyCount:    2,
-    lastAgentMsgAt: <текущий unix timestamp>
-  }
+  userId:  <thread.userId>,
+  newMessages: [
+    { role: "user",  msgId: <msgId1>, text: "<текст>", sentAt: <timestamp> },
+    { role: "user",  msgId: <msgId2>, text: "<текст>", sentAt: <timestamp> },
+    ...все новые user-сообщения из шага 4.1...,
+    { role: "agent", msgId: <messageId из 4.4>, text: "<ответ из 4.3>", sentAt: <текущий unix timestamp> }
+  ]
 )
 ```
 
+Порядок в массиве: сначала все user-сообщения (в хронологическом порядке), затем agent-сообщение.
 
-#### 4c — Нет ответа (status = 'sent' или 'in_dialogue', нет новых сообщений)
-
-Проверить: если `now - entry.lastAgentMsgAt > 48 * 3600`:
+#### 4.6 — Пометить прочитанным (последний шаг)
 
 ```
-dm_history_update(
-  agentId: <agentId>,
-  id:      <entry.id>,
-  fields: { status: 'done' }
-)
+telegram_mark_as_read(chatId: <thread.userId>)
 ```
+
+Этот шаг **всегда последний** в обработке каждого пользователя. Гарантирует, что сообщение не будет потеряно при сбое на предыдущих шагах.
+
+---
+
+### Шаг 5 — Итоговое уведомление
+
+Отправить сообщение в Saved Messages с итогами прогона:
+- сколько DM-чатов с непрочитанными найдено
+- сколько тредов совпало
+- сколько ответов отправлено
+- были ли ошибки
 
 ---
 
@@ -190,7 +203,9 @@ dm_history_update(
 | Инструмент | Шаг | Файл |
 |------------|-----|------|
 | `tg_load_account` | 1 | index.ts |
-| `dm_history_get_active` | 2 | channels-db.ts |
-| `telegram_get_dm_replies` | 3 | index.ts |
-| `telegram_send_dm` | 4a, 4b | index.ts |
-| `dm_history_update` | 4a, 4b, 4c | channels-db.ts |
+| `telegram_get_dm_dialogs` | 2 | index.ts |
+| `dm_threads_get_by_users` | 3 | dm-threads-db.ts |
+| `telegram_get_messages` | 4.1 | index.ts |
+| `telegram_send_dm` | 4.4 | index.ts |
+| `dm_threads_update_msgs` | 4.5 | dm-threads-db.ts |
+| `telegram_mark_as_read` | 4.2, 4.4, 4.6 | index.ts |

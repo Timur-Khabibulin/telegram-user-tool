@@ -49,9 +49,22 @@ tg_channels_get_batch(
 
 ---
 
+### Шаг 4.5 — Экспирировать устаревшие треды
+
+```
+tg_group_thread_expire(
+  agentId:          <agentId>,
+  olderThanSeconds: 345600
+)
+```
+
+Вызвать **один раз** после получения батча, до начала обработки каналов. Помечает треды с `lastActivityAt < now - 4 дней` как `expired`.
+
+---
+
 ### Шаг 5 — Обработать каждый канал из батча
 
-Для **каждого** канала выполнить шаги 5.1–5.7 последовательно.
+Для **каждого** канала выполнить шаги 5.1–5.8 последовательно.
 
 #### 5.1 Получить непрочитанные сообщения
 
@@ -82,19 +95,150 @@ telegram_mark_as_read(
 )
 ```
 
-#### 5.3 Определить темы обсуждения (LLM)
+#### 5.3 Классифицировать сообщения
+
+Вызвать **один раз** на весь массив сообщений из шага 5.1:
+
+```
+tg_classify_messages(
+  agentId:  <agentId>,
+  chatId:   <chatId>,
+  messages: <массив сообщений из шага 5.1>
+)
+```
+
+Результат:
+- `generalMessages` — сообщения, не связанные с тредами агента
+- `newThreadMessages` — `NewThreadEntry[]`: первые ответы пользователей на T2 агента, сгруппированные по `replyToMsgId`
+- `threadReplies` — `ThreadReplyEntry[]`: продолжения существующих тредов, сгруппированные по `threadId` (включая `threadStatus = 'expired'`)
+
+Если категория пуста — пропустить соответствующий шаг обработки.
+
+#### 5.4 Обработать newThreadMessages (первый ответ пользователя)
+
+Для **каждого** `NewThreadEntry` из `newThreadMessages`:
+
+1. Из `entry.agentReplyRecord` взять:
+   - `startMsgId` = `agentReplyRecord.msgId` (T1)
+   - `startMsgText` = `agentReplyRecord.msgText` (текст T1)
+   - `agentMsgId` = `agentReplyRecord.replyMsgId` (T2)
+   - `agentMsgText` = `agentReplyRecord.replyText` (текст T2)
+
+2. Создать тред:
+```
+tg_group_thread_create(
+  agentId:      <agentId>,
+  chatId:       <chatId>,
+  startMsgId:   <agentReplyRecord.msgId>,
+  startMsgText: <agentReplyRecord.msgText>,
+  agentMsgId:   <agentReplyRecord.replyMsgId>,
+  agentMsgText: <agentReplyRecord.replyText>
+)
+```
+   Сохранить `threadId` из результата.
+
+3. Сгенерировать ответ (LLM):
+```
+Ты ведёшь диалог в групповом чате Telegram.
+
+История переписки:
+- Пользователь: <agentReplyRecord.msgText (T1)>
+- Ты: <agentReplyRecord.replyText (T2)>
+<для каждого msg из entry.messages:>
+- <msg.fromName>: <msg.text>
+
+Напиши ответ, продолжающий диалог естественно. До 3 предложений.
+```
+
+4. Отправить ответ:
+```
+telegram_reply_to_message(
+  chatId:           <chatId>,
+  replyToMessageId: <id последнего сообщения из entry.messages>,
+  text:             <ответ из LLM>,
+  originalText:     <текст последнего сообщения из entry.messages>
+)
+```
+   Сохранить `messageId` из результата.
+
+5. Обновить тред:
+```
+tg_group_thread_update(
+  agentId:       <agentId>,
+  threadId:      <threadId из шага 2>,
+  newMessages:   <JSON: все сообщения из entry.messages + ответ агента>,
+  newAgentMsgId: <messageId из шага 4>
+)
+```
+
+Формат `newMessages`:
+```json
+[
+  {"role": "user", "msgId": <id>, "fromName": "<fromName>", "fromId": "<fromId>", "text": "<text>"},
+  {"role": "agent", "msgId": <messageId>, "text": "<ответ агента>"}
+]
+```
+
+#### 5.5 Обработать threadReplies (продолжение существующего треда)
+
+Для **каждого** `ThreadReplyEntry` из `threadReplies` (включая `threadStatus = 'expired'` — обрабатывать одинаково):
+
+1. Использовать `entry.threadMessages` как полную историю переписки.
+
+2. Сгенерировать один ответ (LLM) на все новые сообщения:
+```
+Ты ведёшь диалог в групповом чате Telegram.
+
+История переписки:
+<для каждого m из entry.threadMessages:>
+- <если m.role=user: m.fromName или "Пользователь": m.text>
+- <если m.role=agent: "Ты: m.text">
+
+Новые сообщения:
+<для каждого msg из entry.newMessages:>
+- <msg.fromName>: <msg.text>
+
+Напиши один ответ, продолжающий диалог естественно. До 3 предложений.
+```
+
+3. Отправить ответ:
+```
+telegram_reply_to_message(
+  chatId:           <chatId>,
+  replyToMessageId: <id последнего сообщения из entry.newMessages>,
+  text:             <ответ из LLM>,
+  originalText:     <текст последнего сообщения из entry.newMessages>
+)
+```
+   Сохранить `messageId` из результата.
+
+4. Обновить тред:
+```
+tg_group_thread_update(
+  agentId:       <agentId>,
+  threadId:      <entry.threadId>,
+  newMessages:   <JSON: все сообщения из entry.newMessages + ответ агента>,
+  newAgentMsgId: <messageId из шага 3>
+)
+```
+
+#### 5.6 Обработать generalMessages
+
+Если `generalMessages` пуст — перейти к шагу 5.7. Иначе выполнить подшаги 5.6.1–5.6.4.
+
+##### 5.6.1 Определить темы обсуждения (LLM)
 
 ```
 Перечисли основные темы обсуждения в этих сообщениях.
 Ответь кратко — список тем без пояснений.
 
 Сообщения:
-<список сообщений: fromName + text>
+<список сообщений из generalMessages: fromName + text>
 ```
 
 Если темы не соотносятся с личностью агента — перейти к шагу 5.7.
 
-#### 5.4 Отобрать релевантные сообщения (LLM)
+##### 5.6.2 Отобрать релевантные сообщения (LLM)
 
 ```
 Из списка ниже выбери ОДНО сообщение, на которое тебе есть что ответить
@@ -111,7 +255,7 @@ telegram_mark_as_read(
 
 Если массив пустой — перейти к шагу 5.7.
 
-#### 5.5 Сгенерировать ответы (LLM)
+##### 5.6.3 Сгенерировать ответы (LLM)
 
 Для каждого отобранного сообщения:
 
@@ -121,14 +265,14 @@ telegram_mark_as_read(
 Сообщение: "<text>"
 ```
 
-#### 5.6 Отправить ответы
+##### 5.6.4 Отправить ответы
 
 ```
 telegram_reply_to_message(
   chatId:           <chatId>,
-  replyToMessageId: <id из шага 5.4>,
-  text:             <ответ из шага 5.5>,
-  originalText:     <text оригинального сообщения из шага 5.4>
+  replyToMessageId: <id из шага 5.6.2>,
+  text:             <ответ из шага 5.6.3>,
+  originalText:     <text оригинального сообщения из шага 5.6.2>
 )
 ```
 
@@ -149,7 +293,7 @@ tg_channels_mark_processed(
 
 #### 5.8 Оценить сообщения для DM-кандидатов
 
-После `tg_channels_mark_processed` — для каждого сообщения из шага 5.1, у которого есть `userAccessHash`:
+После `tg_channels_mark_processed` — для каждого сообщения из `generalMessages` (результат шага 5.3), у которого есть `userAccessHash`:
 
 ```
 Оцени следующее сообщение по шкале 0.0–1.0 с точки зрения потенциального интереса
@@ -204,6 +348,10 @@ dm_candidates_insert(
 | `tg_channels_get_batch` | 4 | channels-db.ts |
 | `telegram_get_messages` | 5.1 | index.ts |
 | `telegram_mark_as_read` | 5.2 | index.ts |
-| `telegram_reply_to_message` | 5.6 | index.ts |
+| `tg_group_thread_expire` | 4.5 | channels-db.ts |
+| `tg_classify_messages` | 5.3 | channels-db.ts |
+| `tg_group_thread_create` | 5.4 | channels-db.ts |
+| `tg_group_thread_update` | 5.4, 5.5 | channels-db.ts |
+| `telegram_reply_to_message` | 5.4, 5.5, 5.6.4 | index.ts |
 | `tg_channels_mark_processed` | 5.7 | channels-db.ts |
 | `dm_candidates_insert` | 5.8 | channels-db.ts |

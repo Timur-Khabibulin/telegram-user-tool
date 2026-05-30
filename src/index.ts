@@ -39,6 +39,7 @@ class PluginBridgeLogger extends Logger {
     }
 }
 import { registerChannelDbTools } from "./channels-db";
+import { registerDmThreadsTools } from "./dm-threads-db";
 import { saveReply } from "./replies-db";
 import { registerJoinQueueTools } from "./join-queue-db";
 import * as fs from "fs";
@@ -75,7 +76,6 @@ interface AccountConfig {
 }
 
 let accountConfig: AccountConfig | null = null;
-let currentAgentId: string | null = null;
 
 // InputPeer кэш: chatId (строка) → InputPeer с access_hash.
 // Заполняется в telegram_get_dialogs, где GramJS уже имеет полный
@@ -107,13 +107,15 @@ function resolveAccountConfig(): AccountConfig {
 // поскольку execute() больше не получает ctx с log/cfg.
 
 async function ensureClient(log: PluginLogger): Promise<TelegramClient | null> {
-    const accountId = "default";
-    const key = clientKey(accountId);
+    const account = resolveAccountConfig();
+    const key = clientKey(account.accountId);
 
     const existing = clients.get(key);
-    if (existing?.connected) return existing;
-
-    const account = resolveAccountConfig();
+    if (existing) {
+        if (existing.connected) return existing;
+        await existing.disconnect().catch(() => {});
+        clients.delete(key);
+    }
 
     if (!account.apiId || !account.apiHash) {
         log.error("[telegram-user-tool] ensureClient — missing apiId or apiHash");
@@ -251,26 +253,28 @@ export default definePluginEntry({
                             };
                         }
 
+                        let device: DeviceConfig | undefined;
+                        if (cfg.device && typeof cfg.device === "object") {
+                            const d = cfg.device;
+                            device = {
+                                deviceModel:    d.deviceModel    ? String(d.deviceModel)    : undefined,
+                                systemVersion:  d.systemVersion  ? String(d.systemVersion)  : undefined,
+                                appVersion:     d.appVersion     ? String(d.appVersion)     : undefined,
+                                langCode:       d.langCode       ? String(d.langCode)       : undefined,
+                                systemLangCode: d.systemLangCode ? String(d.systemLangCode) : undefined,
+                            };
+                        }
+
                         const newConfig: AccountConfig = {
                             accountId: cfg.accountId ?? "default",
                             apiId: Number(cfg.apiId),
                             apiHash: String(cfg.apiHash),
                             sessionString: String(cfg.sessionString),
+                            device,
                             proxy,
                         };
 
-                        // Если конфиг изменился — сбрасываем клиент, чтобы пересоздать с новыми данными
-                        if (accountConfig && accountConfig.sessionString !== newConfig.sessionString) {
-                            const key = clientKey(accountConfig.accountId);
-                            const existing = clients.get(key);
-                            if (existing) {
-                                try { await existing.disconnect(); } catch {}
-                                clients.delete(key);
-                            }
-                        }
-
                         accountConfig = newConfig;
-                        currentAgentId = params.agentId;
                         log.info(`[telegram-user-tool] tg_load_account — loaded accountId=${accountConfig.accountId}`);
                         return ok({ ok: true, accountId: accountConfig.accountId });
                     } catch (err: any) {
@@ -306,54 +310,63 @@ export default definePluginEntry({
 
                 async execute(_id, params) {
                     const { apiId, apiHash, phoneNumber, proxy } = params;
-                    log.info(`[telegram-user-tool] tg_auth_send_code — phoneNumber=${phoneNumber} proxy=${proxy ? `${proxy.host}:${proxy.port}` : "none"}`);
+                    const MAX_RETRIES = 3;
+                    const TIMEOUT_MS = 60_000;
+                    log.info(`[telegram-user-tool] tg_auth_send_code — phoneNumber=${phoneNumber}, ${MAX_RETRIES} attempts, ${TIMEOUT_MS / 1000}s timeout each (up to ${MAX_RETRIES * TIMEOUT_MS / 1000}s total)`);
 
-                    const existing = authSessions.get(phoneNumber);
-                    if (existing) {
-                        await existing.disconnect().catch(() => {});
-                        authSessions.delete(phoneNumber);
-                    }
+                    let lastError: any;
+                    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                        const existing = authSessions.get(phoneNumber);
+                        if (existing) {
+                            await existing.disconnect().catch(() => {});
+                            authSessions.delete(phoneNumber);
+                        }
 
-                    const client = new TelegramClient(new StringSession(""), apiId, apiHash, {
-                        connectionRetries: 3,
-                        baseLogger: new PluginBridgeLogger(log),
-                        connection: ConnectionTCPObfuscated,
-                        useWSS: !proxy,
-                        ...(proxy && {
-                            proxy: {
-                                socksType: proxy.type === "socks5" ? 5 : 4,
-                                ip: proxy.host,
-                                port: proxy.port,
-                                username: proxy.username,
-                                password: proxy.password,
-                                timeout: 10,
-                            },
-                        }),
-                    });
-
-                    try {
-                        await client.connect();
-                        const result = await client.invoke(
-                            new Api.auth.SendCode({
-                                phoneNumber,
-                                apiId,
-                                apiHash,
-                                settings: new Api.CodeSettings({}),
-                            })
-                        ) as any;
-
-                        authSessions.set(phoneNumber, client);
-                        log.info(`[telegram-user-tool] tg_auth_send_code — code sent, type=${result.type?.className}`);
-
-                        return ok({
-                            phoneCodeHash: result.phoneCodeHash,
-                            codeType: result.type?.className ?? "unknown",
+                        const client = new TelegramClient(new StringSession(""), apiId, apiHash, {
+                            connectionRetries: 1,
+                            baseLogger: new PluginBridgeLogger(log),
+                            connection: ConnectionTCPObfuscated,
+                            useWSS: !proxy,
+                            ...(proxy && {
+                                proxy: {
+                                    socksType: proxy.type === "socks5" ? 5 : 4,
+                                    ip: proxy.host,
+                                    port: proxy.port,
+                                    username: proxy.username,
+                                    password: proxy.password,
+                                    timeout: 10,
+                                },
+                            }),
                         });
-                    } catch (err: any) {
-                        await client.disconnect().catch(() => {});
-                        log.error(`[telegram-user-tool] tg_auth_send_code — error: ${err.message ?? err}`);
-                        return fail(err);
+
+                        try {
+                            log.info(`[telegram-user-tool] tg_auth_send_code — attempt ${attempt}/${MAX_RETRIES}`);
+                            await Promise.race([
+                                client.connect(),
+                                new Promise<never>((_, reject) =>
+                                    setTimeout(() => reject(new Error(`connect timed out after ${TIMEOUT_MS / 1000}s`)), TIMEOUT_MS)
+                                ),
+                            ]);
+                            const result = await Promise.race([
+                                client.invoke(new Api.auth.SendCode({ phoneNumber, apiId, apiHash, settings: new Api.CodeSettings({}) })),
+                                new Promise<never>((_, reject) =>
+                                    setTimeout(() => reject(new Error(`sendCode timed out after ${TIMEOUT_MS / 1000}s`)), TIMEOUT_MS)
+                                ),
+                            ]) as any;
+
+                            authSessions.set(phoneNumber, client);
+                            log.info(`[telegram-user-tool] tg_auth_send_code — success on attempt ${attempt}/${MAX_RETRIES}, type=${result.type?.className}`);
+                            return ok({ phoneCodeHash: result.phoneCodeHash, codeType: result.type?.className ?? "unknown" });
+                        } catch (err: any) {
+                            await client.disconnect().catch(() => {});
+                            lastError = err;
+                            log.warn(`[telegram-user-tool] tg_auth_send_code — attempt ${attempt}/${MAX_RETRIES} failed: ${err.message ?? err}`);
+                            if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, 2_000));
+                        }
                     }
+
+                    log.error(`[telegram-user-tool] tg_auth_send_code — all ${MAX_RETRIES} attempts failed`);
+                    return fail(lastError);
                 },
             },
             { optional: true },
@@ -377,7 +390,9 @@ export default definePluginEntry({
 
                 async execute(_id, params) {
                     const { phoneNumber, phoneCodeHash, phoneCode, password } = params;
-                    log.info(`[telegram-user-tool] tg_auth_sign_in — phoneNumber=${phoneNumber}`);
+                    const MAX_RETRIES = 3;
+                    const TIMEOUT_MS = 60_000;
+                    log.info(`[telegram-user-tool] tg_auth_sign_in — phoneNumber=${phoneNumber}, ${MAX_RETRIES} attempts, ${TIMEOUT_MS / 1000}s timeout each`);
 
                     const client = authSessions.get(phoneNumber);
                     if (!client) {
@@ -389,35 +404,52 @@ export default definePluginEntry({
                         await client.disconnect().catch(() => {});
                     };
 
-                    try {
-                        await client.invoke(
-                            new Api.auth.SignIn({ phoneNumber, phoneCodeHash, phoneCode })
-                        );
-                    } catch (err: any) {
-                        if (err.errorMessage === "SESSION_PASSWORD_NEEDED") {
-                            if (!password) {
-                                return fail("2FA password is required. Call tg_auth_sign_in again with the password parameter.");
+                    const invokeWithTimeout = <T>(p: Promise<T>) =>
+                        Promise.race([p, new Promise<never>((_, reject) =>
+                            setTimeout(() => reject(new Error(`invoke timed out after ${TIMEOUT_MS / 1000}s`)), TIMEOUT_MS)
+                        )]);
+
+                    // Phase 1: sign in, retry only on timeout
+                    let needs2FA = false;
+                    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                        try {
+                            log.info(`[telegram-user-tool] tg_auth_sign_in — attempt ${attempt}/${MAX_RETRIES}`);
+                            await invokeWithTimeout(
+                                client.invoke(new Api.auth.SignIn({ phoneNumber, phoneCodeHash, phoneCode }))
+                            );
+                            break;
+                        } catch (err: any) {
+                            if (err.errorMessage === "SESSION_PASSWORD_NEEDED") {
+                                needs2FA = true;
+                                break;
                             }
-                            try {
-                                const pwdInfo = await client.invoke(new Api.account.GetPassword()) as any;
-                                const pwdCheck = await computeCheck(pwdInfo, password);
-                                await client.invoke(new Api.auth.CheckPassword({ password: pwdCheck }));
-                            } catch (pwdErr: any) {
+                            log.warn(`[telegram-user-tool] tg_auth_sign_in — attempt ${attempt}/${MAX_RETRIES} failed: ${err.message ?? err}`);
+                            if (attempt === MAX_RETRIES || !err.message?.includes("timed out")) {
                                 await cleanup();
-                                log.error(`[telegram-user-tool] tg_auth_sign_in — 2FA error: ${pwdErr.message ?? pwdErr}`);
-                                return fail(pwdErr);
+                                return fail(err);
                             }
-                        } else {
+                        }
+                    }
+
+                    // Phase 2: 2FA if needed
+                    if (needs2FA) {
+                        if (!password) {
+                            return fail("2FA password is required. Call tg_auth_sign_in again with the password parameter.");
+                        }
+                        try {
+                            const pwdInfo = await invokeWithTimeout(client.invoke(new Api.account.GetPassword())) as any;
+                            const pwdCheck = await computeCheck(pwdInfo, password);
+                            await invokeWithTimeout(client.invoke(new Api.auth.CheckPassword({ password: pwdCheck })));
+                        } catch (pwdErr: any) {
                             await cleanup();
-                            log.error(`[telegram-user-tool] tg_auth_sign_in — error: ${err.message ?? err}`);
-                            return fail(err);
+                            log.error(`[telegram-user-tool] tg_auth_sign_in — 2FA error: ${pwdErr.message ?? pwdErr}`);
+                            return fail(pwdErr);
                         }
                     }
 
                     const sessionString = (client.session as StringSession).save();
                     await cleanup();
                     log.info(`[telegram-user-tool] tg_auth_sign_in — success, sessionString length=${sessionString.length}`);
-
                     return ok({ sessionString });
                 },
             },
@@ -584,11 +616,16 @@ export default definePluginEntry({
                                 ) {
                                     entry.userAccessHash = m.sender.accessHash.toString();
                                 }
+                                // Если сообщение является ответом на другое — добавляем replyToMsgId.
+                                if (m.replyTo?.replyToMsgId) {
+                                    entry.replyToMsgId = m.replyTo.replyToMsgId;
+                                }
                                 return entry;
                             });
 
+                        const withReply = result.filter((m) => m.replyToMsgId !== undefined).length;
                         log.info(
-                            `[telegram-user-tool] tool:telegram_get_messages — chatId=${chatId} returned ${result.length} messages`
+                            `[telegram-user-tool] tool:telegram_get_messages — chatId=${chatId} returned ${result.length} messages, ${withReply} with replyToMsgId`
                         );
 
                         return ok({ chatId, messages: result });
@@ -697,10 +734,15 @@ export default definePluginEntry({
                     originalText: Type.Optional(Type.String({
                         description: "Text of the original message being replied to. Used for logging purposes.",
                     })),
+                    agentId: Type.Optional(Type.String({
+                        description:
+                            "agentId from the Runtime section. When provided, the reply is recorded " +
+                            "to the per-agent replies DB at ~/.openclaw/workspace-<agentId>/.",
+                    })),
                 }),
 
                 async execute(_id, params) {
-                    const { chatId, replyToMessageId, text } = params;
+                    const { chatId, replyToMessageId, text, agentId } = params;
                     log.info(
                         `[telegram-user-tool] tool:telegram_reply_to_message called — chatId=${chatId} replyToMessageId=${replyToMessageId} text="${text.slice(0, 50)}..."`
                     );
@@ -726,9 +768,9 @@ export default definePluginEntry({
                             `[telegram-user-tool] tool:telegram_reply_to_message — sent reply messageId=${result.id} to chatId=${chatId}`
                         );
 
-                        if (currentAgentId) {
+                        if (agentId) {
                             try {
-                                saveReply(currentAgentId, {
+                                saveReply(agentId, {
                                     chatId,
                                     msgId:      replyToMessageId,
                                     msgText:    params.originalText,
@@ -959,9 +1001,11 @@ export default definePluginEntry({
             {
                 name: "telegram_send_dm",
                 description:
-                    "Send a direct message to a Telegram user by userId and accessHash. " +
-                    "InputPeerUser is constructed explicitly — never uses getEntity. " +
-                    "Handles FLOOD_WAIT with one retry, USER_PRIVACY_RESTRICTED, and USER_DEACTIVATED. " +
+                    "Send a direct message to a Telegram user. " +
+                    "PREFERRED: provide chatId + msgId (the group and message where you saw the user) — " +
+                    "uses InputPeerUserFromMessage which works even for min-entities and avoids PEER_ID_INVALID. " +
+                    "FALLBACK: provide accessHash only if the user is NOT a min-entity (userAccessHash field present in telegram_get_messages). " +
+                    "Handles FLOOD_WAIT with one retry, USER_PRIVACY_RESTRICTED, USER_DEACTIVATED, PEER_ID_INVALID. " +
                     "When historyRecord is provided and the send succeeds, atomically writes the record to " +
                     "dm_history and returns { ok: true, messageId, historySaved: true }. " +
                     "On any error, dm_history is never written — no separate dm_history_insert call needed.",
@@ -969,9 +1013,23 @@ export default definePluginEntry({
                     userId: Type.String({
                         description: "Numeric Telegram user ID (string)",
                     }),
-                    accessHash: Type.String({
-                        description: "User access hash obtained from telegram_get_messages userAccessHash field",
-                    }),
+                    chatId: Type.Optional(Type.String({
+                        description:
+                            "PREFERRED. Numeric ID of the group chat where the user sent a message. " +
+                            "Used together with msgId to construct InputPeerUserFromMessage — " +
+                            "the correct way to address min-entity users from groups.",
+                    })),
+                    msgId: Type.Optional(Type.Number({
+                        description:
+                            "PREFERRED. ID of the specific message the user sent in the group (from telegram_get_messages). " +
+                            "Used together with chatId for InputPeerUserFromMessage.",
+                    })),
+                    accessHash: Type.Optional(Type.String({
+                        description:
+                            "FALLBACK only. User access hash from telegram_get_messages userAccessHash field. " +
+                            "Only works when userAccessHash is present (non-min entity). " +
+                            "Prefer chatId+msgId instead.",
+                    })),
                     text: Type.String({
                         description: "Text of the DM to send",
                     }),
@@ -997,7 +1055,7 @@ export default definePluginEntry({
                 }),
 
                 async execute(_id, params) {
-                    const { userId, accessHash, text, agentId, historyRecord } = params;
+                    const { userId, chatId, msgId, accessHash, text, agentId, historyRecord } = params;
                     log.info(
                         `[telegram-user-tool] tool:telegram_send_dm called — userId=${userId} text="${text.slice(0, 50)}..."`
                     );
@@ -1005,10 +1063,29 @@ export default definePluginEntry({
                     const client = await ensureClient(log);
                     if (!client) return fail("Client not connected");
 
-                    const peer = new Api.InputPeerUser({
-                        userId: BigInt(userId),
-                        accessHash: BigInt(accessHash),
-                    });
+                    let peer: Api.TypeInputPeer;
+                    if (chatId && msgId != null) {
+                        const groupPeer = peerCache.get(chatId);
+                        if (!groupPeer) {
+                            return fail(
+                                `No InputPeer cached for chatId=${chatId}. Call telegram_get_dialogs first.`
+                            );
+                        }
+                        peer = new Api.InputPeerUserFromMessage({
+                            peer: groupPeer,
+                            msgId,
+                            userId: BigInt(userId),
+                        });
+                        log.info(`[telegram-user-tool] tool:telegram_send_dm — using InputPeerUserFromMessage chatId=${chatId} msgId=${msgId}`);
+                    } else if (accessHash) {
+                        peer = new Api.InputPeerUser({
+                            userId: BigInt(userId),
+                            accessHash: BigInt(accessHash),
+                        });
+                        log.info(`[telegram-user-tool] tool:telegram_send_dm — using InputPeerUser (accessHash fallback)`);
+                    } else {
+                        return fail("Either (chatId + msgId) or accessHash must be provided.");
+                    }
 
                     // Вспомогательная: извлечь кол-во секунд из "FLOOD_WAIT_X"
                     const parseFloodWait = (msg: string): number | null => {
@@ -1147,88 +1224,105 @@ export default definePluginEntry({
             { optional: true },
         );
 
-        // ── telegram_get_dm_replies ───────────────────────────────────
+        // ── telegram_get_dm_dialogs ──────────────────────────────────
 
         api.registerTool(
             {
-                name: "telegram_get_dm_replies",
+                name: "telegram_get_dm_dialogs",
                 description:
-                    "For each entry in the list: construct InputPeerUser from userId + userAccessHash, " +
-                    "fetch last 20 messages from that DM conversation, " +
-                    "and return only messages sent BY the user (not the agent) with date > lastAgentMsgAt.",
-                parameters: Type.Object({
-                    entries: Type.Array(
-                        Type.Object({
-                            userId: Type.String({ description: "Numeric Telegram user ID" }),
-                            userAccessHash: Type.String({ description: "User access hash" }),
-                            lastAgentMsgAt: Type.Number({
-                                description: "Unix timestamp of the last message sent by the agent to this user",
-                            }),
-                        }),
-                        { description: "List of DM conversations to check for replies" }
-                    ),
-                }),
+                    "Get list of personal (1-on-1) Telegram chats that have unread messages. " +
+                    "Filters out bots and service notifications (userId 777000). " +
+                    "Populates peerCache with InputPeerUser for each returned user. " +
+                    "Call this once at the start of each dm-replies run.",
+                parameters: Type.Object({}),
 
-                async execute(_id, params) {
-                    const { entries } = params;
-                    log.info(
-                        `[telegram-user-tool] tool:telegram_get_dm_replies called — ${entries.length} entries`
-                    );
+                async execute(_id, _params) {
+                    log.info("[telegram-user-tool] tool:telegram_get_dm_dialogs called");
 
                     const client = await ensureClient(log);
                     if (!client) return fail("Client not connected");
 
-                    const me = await client.getMe();
-                    const myId = me.id.toString();
+                    try {
+                        const dialogs = await client.getDialogs({ limit: 100 });
 
-                    const results: Array<{
-                        userId: string;
-                        messages: Array<{ id: number; text: string; date: number }>;
-                    }> = [];
+                        const dms = dialogs
+                            .filter((d: any) => d.isUser === true)
+                            .map((d: any) => {
+                                const entity = d.entity;
 
-                    for (const entry of entries) {
-                        const { userId, userAccessHash, lastAgentMsgAt } = entry;
-                        const peer = new Api.InputPeerUser({
-                            userId: BigInt(userId),
-                            accessHash: BigInt(userAccessHash),
-                        });
+                                // Skip non-User entities (safety check)
+                                if (!(entity instanceof Api.User)) return null;
 
-                        try {
-                            const msgs = await client.getMessages(peer as any, { limit: 20 });
-                            const filtered = msgs
-                                .filter((m: any) => {
-                                    // Только сообщения от пользователя (не от агента)
-                                    const senderId = m.senderId?.toString() ?? "";
-                                    if (senderId === myId) return false;
-                                    // Только новее последнего сообщения агента
-                                    if (m.date <= lastAgentMsgAt) return false;
-                                    return true;
-                                })
-                                .map((m: any) => ({
-                                    id: m.id,
-                                    text: m.text ?? m.message ?? "",
-                                    date: m.date,
-                                }));
+                                // Skip bots
+                                if (entity.bot) {
+                                    log.info(
+                                        `[telegram-user-tool] get_dm_dialogs — skipping bot userId=${entity.id}`
+                                    );
+                                    return null;
+                                }
 
-                            results.push({ userId, messages: filtered });
-                            log.info(
-                                `[telegram-user-tool] get_dm_replies — userId=${userId} found ${filtered.length} new messages`
-                            );
-                        } catch (err: any) {
-                            log.warn(
-                                `[telegram-user-tool] get_dm_replies — userId=${userId} error: ${err.message ?? err}`
-                            );
-                            results.push({ userId, messages: [] });
-                        }
+                                // Skip service notifications (userId 777000)
+                                const userIdStr = entity.id?.toString() ?? "";
+                                if (userIdStr === "777000") {
+                                    log.info(
+                                        `[telegram-user-tool] get_dm_dialogs — skipping service notifications (777000)`
+                                    );
+                                    return null;
+                                }
+
+                                // Skip min entities — accessHash is incomplete
+                                if (entity.min) {
+                                    log.warn(
+                                        `[telegram-user-tool] get_dm_dialogs — skipping min entity for userId=${userIdStr}`
+                                    );
+                                    return null;
+                                }
+
+                                const unreadCount = d.dialog?.unreadCount ?? 0;
+                                if (unreadCount === 0) return null;
+
+                                const accessHash = entity.accessHash;
+                                if (accessHash == null) {
+                                    log.warn(
+                                        `[telegram-user-tool] get_dm_dialogs — skipping userId=${userIdStr}, no accessHash`
+                                    );
+                                    return null;
+                                }
+
+                                // Populate peerCache with InputPeerUser
+                                const inputPeer = new Api.InputPeerUser({
+                                    userId: entity.id,
+                                    accessHash,
+                                });
+                                peerCache.set(userIdStr, inputPeer);
+
+                                return {
+                                    userId: userIdStr,
+                                    accessHash: accessHash.toString(),
+                                    userName: entity.username ?? null,
+                                    firstName: entity.firstName ?? null,
+                                    unreadCount,
+                                    readInboxMaxId: d.dialog?.readInboxMaxId ?? 0,
+                                };
+                            })
+                            .filter((item): item is NonNullable<typeof item> => item !== null);
+
+                        log.info(
+                            `[telegram-user-tool] tool:telegram_get_dm_dialogs — found ${dms.length} DM chats with unread messages`
+                        );
+
+                        return ok({ dms });
+                    } catch (err: any) {
+                        log.error(`[telegram-user-tool] tool:telegram_get_dm_dialogs — error: ${err.message ?? err}`);
+                        return fail(err);
                     }
-
-                    return ok({ results });
                 },
             },
             { optional: true },
         );
 
         registerChannelDbTools(api, ensureClient);
+        registerDmThreadsTools(api);
         registerJoinQueueTools(api);
     },
 });
