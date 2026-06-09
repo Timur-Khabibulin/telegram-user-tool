@@ -8,11 +8,19 @@
   },
   "openclaw": {
     "extensions": [
-      "./index.ts"
+      "./src/index.ts"
     ]
   },
   "dependencies": {
-    "telegram": "^2.26.0"
+    "@ai-sdk/openai": "^3.0.67",
+    "ai": "^6.0.193",
+    "ai-fallback": "^2.0.1",
+    "better-sqlite3": "^12.8.0",
+    "cron-parser": "^4.9.0",
+    "openai-oauth-provider": "^1.0.3",
+    "telegram": "^2.26.0",
+    "tsx": "^4.22.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

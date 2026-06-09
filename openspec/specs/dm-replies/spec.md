@@ -1,5 +1,8 @@
-## MODIFIED Requirements
+# dm-replies Specification
 
+## Purpose
+TBD - normalized from legacy archive format. Update Purpose after archive.
+## Requirements
 ### Requirement: dm-replies skill handles incoming DMs via push-model
 Скилл `dm-replies` (SKILL.md) SHALL запускаться каждые 30 минут.
 Работает только с 08:00 до 01:00 UTC+5. Алгоритм:
@@ -12,12 +15,11 @@
 6. Если `threads` пуст → завершить
 7. Для каждого совпадения:
    - 7.1 `telegram_get_messages(chatId=userId, minId=<последний msgId>)` → новые сообщения
-   - 7.2 Sentiment analysis (LLM): тональность последнего сообщения → `positive` / `negative`
-   - 7.3 Если `negative` → `telegram_mark_as_read(chatId=userId)`, перейти к следующему
-   - 7.4 LLM генерирует ответ: `triggerMessage` + `thread.messages` (до 50) + новые сообщения
-   - 7.5 `telegram_send_dm(userId, text)` → отправить ответ
-   - 7.6 `dm_threads_update_msgs(userId, newMessages)` → обновить messages и lastActivityAt
-   - 7.7 `telegram_mark_as_read(chatId=userId)` — последний шаг обработки
+   - 7.2 **Один структурированный LLM-вызов**: тональность последнего сообщения + ответ с контекстом (`triggerMessage` + `thread.messages` до 50 + новые сообщения) → `{ sentiment: positive | negative, ответ: string | null }`. При `negative` ответ не генерируется (поле пустое).
+   - 7.3 Если `sentiment = negative` → `telegram_mark_as_read(chatId=userId)`, перейти к следующему
+   - 7.4 `telegram_send_dm(userId, text=ответ)` → отправить сгенерированный ответ
+   - 7.5 `dm_threads_update_msgs(userId, newMessages)` → обновить messages и lastActivityAt
+   - 7.6 `telegram_mark_as_read(chatId=userId)` — последний шаг обработки
 
 #### Scenario: Out of hours — no action
 - **WHEN** текущее время UTC+5 вне диапазона 08:00–01:00
@@ -33,12 +35,15 @@
 
 #### Scenario: Positive reply — full context response
 - **WHEN** пользователь прислал сообщение с позитивной/нейтральной тональностью
-- **THEN** агент генерирует ответ с контекстом (triggerMessage + messages + новые),
-  отправляет через `telegram_send_dm`, обновляет тред, вызывает `mark_as_read`
+- **THEN** один структурированный вызов возвращает `sentiment=positive` и готовый `ответ`; агент отправляет его через `telegram_send_dm`, обновляет тред, вызывает `mark_as_read`
 
 #### Scenario: Negative sentiment — mark as read and skip
-- **WHEN** LLM определяет негативную тональность (агрессия, "спам", "отпишись")
-- **THEN** `telegram_mark_as_read`, ответ не отправляется, тред сохраняется
+- **WHEN** структурированный вызов возвращает `sentiment=negative` (агрессия, "спам", "отпишись")
+- **THEN** `ответ` пуст, `telegram_mark_as_read`, ответ не отправляется, тред сохраняется
+
+#### Scenario: One LLM call per thread
+- **WHEN** для треда есть новые сообщения пользователя
+- **THEN** анализ тональности и генерация ответа выполняются одним LLM-вызовом, а не двумя
 
 #### Scenario: Multiple messages from user in one run
 - **WHEN** пользователь отправил несколько сообщений между прогонами
@@ -59,3 +64,4 @@
 #### Scenario: peer_id_invalid during reply
 - **WHEN** `telegram_send_dm` возвращает `{ error: 'peer_id_invalid' }`
 - **THEN** `mark_as_read`, переход к следующему; accessHash обновится на следующем прогоне
+

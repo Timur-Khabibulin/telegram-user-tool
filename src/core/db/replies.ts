@@ -1,12 +1,11 @@
+// core/db/replies.ts — SQLite-хранилище ответов и тредов групп.
+//
+// Перенесено из прежнего replies-db.ts без изменения поведения. Уже было
+// набором чистых функций без зависимостей OpenClaw; единственное изменение —
+// путь к БД берётся из core/config (DRY).
+
 import Database from "better-sqlite3";
-import * as path from "path";
-import * as os from "os";
-
-// ─── Helpers ──────────────────────────────────────────────────────────
-
-function resolveDbPath(agentId: string): string {
-    return path.join(os.homedir(), ".openclaw", `workspace-${agentId}`, "tg-replies.db");
-}
+import { repliesDbPath } from "../config";
 
 function openDb(dbPath: string): Database.Database {
     return new Database(dbPath);
@@ -56,8 +55,6 @@ export interface ReplyRecord {
     replyText: string;
 }
 
-// ─── Thread types ─────────────────────────────────────────────────────
-
 export interface ThreadMessage {
     role: "user" | "agent";
     msgId: number;
@@ -92,8 +89,7 @@ export function findThreadByAgentMsgId(
     chatId: string,
     agentMsgId: number,
 ): ThreadRecord | null {
-    const dbPath = resolveDbPath(agentId);
-    const db = openDb(dbPath);
+    const db = openDb(repliesDbPath(agentId));
     try {
         ensureTable(db);
         const row = db.prepare(`
@@ -125,8 +121,7 @@ export function createThread(
     messages: ThreadMessage[],
     agentMsgId: number,
 ): number {
-    const dbPath = resolveDbPath(agentId);
-    const db = openDb(dbPath);
+    const db = openDb(repliesDbPath(agentId));
     try {
         ensureTable(db);
         const now = Math.floor(Date.now() / 1000);
@@ -159,13 +154,11 @@ export function updateThread(
     newMessages: ThreadMessage[],
     newAgentMsgId: number,
 ): void {
-    const dbPath = resolveDbPath(agentId);
-    const db = openDb(dbPath);
+    const db = openDb(repliesDbPath(agentId));
     try {
         ensureTable(db);
         const now = Math.floor(Date.now() / 1000);
 
-        // Fetch current messages and chatId
         const row = db.prepare(`
             SELECT chatId, messages FROM group_threads WHERE id = @threadId
         `).get({ threadId }) as { chatId: string; messages: string } | undefined;
@@ -193,8 +186,7 @@ export function updateThread(
 }
 
 export function expireOldThreads(agentId: string, olderThanSeconds: number): number {
-    const dbPath = resolveDbPath(agentId);
-    const db = openDb(dbPath);
+    const db = openDb(repliesDbPath(agentId));
     try {
         ensureTable(db);
         const threshold = Math.floor(Date.now() / 1000) - olderThanSeconds;
@@ -214,8 +206,7 @@ export function findReplyByReplyMsgId(
     chatId: string,
     replyMsgId: number,
 ): ReplyLookupRecord | null {
-    const dbPath = resolveDbPath(agentId);
-    const db = openDb(dbPath);
+    const db = openDb(repliesDbPath(agentId));
     try {
         ensureTable(db);
         const row = db.prepare(`
@@ -234,8 +225,7 @@ export function findReplyByReplyMsgId(
 // ─── Saves ────────────────────────────────────────────────────────────
 
 export function saveReply(agentId: string, record: ReplyRecord): void {
-    const dbPath = resolveDbPath(agentId);
-    const db = openDb(dbPath);
+    const db = openDb(repliesDbPath(agentId));
     try {
         ensureTable(db);
         db.prepare(`

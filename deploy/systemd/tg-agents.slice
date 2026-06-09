@@ -1,0 +1,13 @@
+[Unit]
+Description=Telegram agents resource slice
+
+[Slice]
+CPUQuota=70%
+MemoryMax=2G
+# ConcurrencySoftMax=4 — лимит одновременных диспетчеров. Доступен только с
+# systemd >= 256; на VPS systemd 255, поэтому директива опущена (иначе бы просто
+# игнорировалась с warning). Нагрузку ограничивают CPUQuota + MemoryMax на всю
+# группу; старты разносит RandomizedDelaySec в таймере, а холостые прогоны
+# (нет назревших задач) выходят за секунду — реальная одновременность низкая.
+# Когда systemd обновится до 256+ — раскомментировать строку ниже:
+# ConcurrencySoftMax=4

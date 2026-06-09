@@ -1,0 +1,13 @@
+# Запуск дневной сводки на границе дня UTC+5 (00:00 UTC+5 = 19:00 UTC).
+# Persistent=true — если VPS был выключен в момент срабатывания, прогон
+# наверстается при следующем старте.
+
+[Unit]
+Description=Telegram daily run summary timer (00:00 UTC+5 = 19:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 19:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

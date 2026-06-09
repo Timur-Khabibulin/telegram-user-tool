@@ -8,10 +8,6 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "moduleResolution": "bundler",
-    "paths": {
-      "openclaw/plugin-sdk": ["../openclaw/src/plugin-sdk/index.ts"],
-      "openclaw/plugin-sdk/*": ["../openclaw/src/plugin-sdk/*.ts"]
-    },
     "types": ["node"]
   },
   "include": ["src"]

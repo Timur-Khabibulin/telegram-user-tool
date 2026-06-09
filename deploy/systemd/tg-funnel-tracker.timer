@@ -1,0 +1,15 @@
+# Запуск воронки на границе дня UTC+5 (00:10 UTC+5 = 19:10 UTC).
+# Сдвиг на 10 минут позже tg-daily-summary (19:00 UTC), чтобы день полностью
+# завершился и таймеры не стартовали одновременно.
+# Persistent=true — если VPS был выключен в момент срабатывания, прогон
+# наверстается при следующем старте.
+
+[Unit]
+Description=Telegram funnel tracker timer (00:10 UTC+5 = 19:10 UTC)
+
+[Timer]
+OnCalendar=*-*-* 19:10:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
