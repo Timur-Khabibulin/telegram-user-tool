@@ -1,13 +1,22 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Проект: Telegram-агент от лица реального аккаунта (MTProto/GramJS) — ведёт
+  активность в группах и личке, копит DM-кандидатов, прогревает аккаунт, собирает
+  воронку. Цель — рост приватного канала через живое вовлечение. См. docs/product.md.
+
+  Архитектура: общее ядро src/core/ + два входа — OpenClaw-плагин (src/index.ts)
+  и standalone-диспетчер (src/scripts/dispatcher.ts, запуск systemd-таймером).
+  Скиллы (src/skills/*) — функции (SkillContext) => SkillStatus, вызываются
+  диспетчером по таблице tasks. Данные — SQLite (better-sqlite3) в
+  ~/.openclaw/workspace-<agentId>/. Подробно — docs/architecture.md.
+
+  Стек: TypeScript (strict), tsx (без сборки), better-sqlite3, telegram (GramJS),
+  ai-sdk + codex OAuth. Стандарт кода — docs/coding-standards.md.
+
+  База знаний и правила разработки: docs/README.md, docs/workflow.md,
+  docs/agent-playbook.md. Аналитика фич для человека — docs/design/<feature>/;
+  здесь, в openspec, — нормативное поведение для агента.
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.

@@ -14,3 +14,6 @@ yarn-error.log*
 /.idea
 local.properties
 /.claude/settings.local.json
+
+.DS_Store
+*.session

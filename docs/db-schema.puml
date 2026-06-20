@@ -1,0 +1,345 @@
+@startuml db-schema
+' ER-диаграмма всех сущностей платформы, сгруппированных по файлам SQLite.
+' Источник истины — схемы в src/core/db/*.ts и src/core/config.ts (пути к БД).
+' PK — первичный ключ, U — UNIQUE, FK — внешний ключ.
+'
+' Файлы БД лежат в ~/.openclaw/workspace-<agentId>/:
+'   per-agent  — по одному файлу у каждого агента;
+'   admin-only — только у админ-агента (agent1): funnel.db, discovery.db.
+
+hide circle
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam shadowing false
+
+' ─────────────────────────────────────────────────────────────────────
+' tg-channels.db (per-agent) — channelsDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "tg-channels.db  (per-agent)" #E8F0FE {
+
+    entity "channels" as channels {
+        * chatId : TEXT <<PK>>
+        --
+        * title : TEXT
+        * lastProcessedAt : INTEGER
+        channelId : TEXT
+        channelAccessHash : TEXT
+        channelUsername : TEXT
+        * channelResolved : INTEGER
+    }
+
+    entity "dm_candidates" as dm_candidates {
+        * id : INTEGER <<PK>>
+        --
+        * userId : TEXT
+        userAccessHash : TEXT
+        * sourceChatId : TEXT
+        * msgId : INTEGER
+        * msgText : TEXT
+        score : REAL
+        scoreReason : TEXT
+        status : TEXT
+        * createdAt : INTEGER
+        --
+        U (sourceChatId, msgId)
+    }
+
+    entity "dm_history" as dm_history {
+        * id : INTEGER <<PK>>
+        --
+        * userId : TEXT
+        * userAccessHash : TEXT
+        username : TEXT
+        * triggerText : TEXT
+        * dmText : TEXT
+        * sentAt : INTEGER
+        * lastAgentMsgAt : INTEGER
+        replyCount : INTEGER
+        status : TEXT
+    }
+
+    note as N_channels_db
+      <b>Назначение.</b> Рабочее состояние группового монитора агента.
+      ----
+      <b>Таблицы</b>
+      • channels — обойдённые чаты и их период обхода
+      • dm_candidates — кандидаты на DM, отобранные из групп
+      • dm_history — журнал отправленных DM
+    end note
+
+    note bottom of dm_candidates
+      <b>status</b> · начальный: pending
+      ----
+      • pending — ожидает обработки
+      • sent — DM отправлен
+      • skipped — пропущен (фильтр или ошибка отправки)
+      • privacy_blocked — у пользователя закрыта личка
+      • deactivated — аккаунт пользователя удалён
+      • expired — старше N дней без отправки
+      ----
+      <b>Переходы:</b> pending → sent | skipped | privacy_blocked | deactivated | expired
+    end note
+
+    note bottom of dm_history
+      <b>status</b> · начальный: sent
+      ----
+      • sent — DM отправлен (иных значений код пока не пишет)
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' tg-replies.db (per-agent) — repliesDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "tg-replies.db  (per-agent)" #E6F4EA {
+
+    entity "replies" as replies {
+        * id : INTEGER <<PK>>
+        --
+        * chatId : TEXT
+        * msgId : INTEGER
+        msgText : TEXT
+        replyMsgId : INTEGER
+        * replyText : TEXT
+        * sentAt : INTEGER
+    }
+
+    entity "group_threads" as group_threads {
+        * id : INTEGER <<PK>>
+        --
+        * chatId : TEXT
+        * startMsgId : INTEGER
+        * status : TEXT
+        * lastActivityAt : INTEGER
+        * messages : TEXT (JSON)
+    }
+
+    entity "group_thread_agent_msgs" as gtam {
+        * agentMsgId : INTEGER <<PK>>
+        * chatId : TEXT <<PK>>
+        --
+        * threadId : INTEGER <<FK>>
+    }
+
+    note as N_replies_db
+      <b>Назначение.</b> Ответы агента в группах и групповые треды-диалоги.
+      ----
+      <b>Таблицы</b>
+      • replies — отправленные ответы агента в группах
+      • group_threads — состояние и история сообщений треда
+      • group_thread_agent_msgs — индекс «сообщение агента → тред»
+    end note
+
+    note bottom of group_threads
+      <b>status</b> · начальный: active
+      ----
+      • active — тред идёт
+      • expired — нет активности дольше порога
+      ----
+      <b>Переходы:</b> active → expired
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' dm-threads.db (per-agent) — dmThreadsDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "dm-threads.db  (per-agent)" #FEF7E0 {
+
+    entity "dm_threads" as dm_threads {
+        * id : INTEGER <<PK>>
+        --
+        * userId : TEXT <<U>>
+        * userAccessHash : TEXT
+        userName : TEXT
+        * fromChatId : TEXT
+        * triggerMessage : TEXT
+        * messages : TEXT (JSON)
+        * createdAt : INTEGER
+        * lastActivityAt : INTEGER
+    }
+
+    note as N_dm_threads_db
+      <b>Назначение.</b> Контекстные DM-диалоги для ведения переписки в личке.
+      ----
+      <b>Таблицы</b>
+      • dm_threads — один тред на userId, окно 50 сообщений, cooldown 14 дней
+      ----
+      <b>Статусов нет.</b> Активность определяется по lastActivityAt.
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' tg-join-queue.db (per-agent) — joinQueueDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "tg-join-queue.db  (per-agent)" #FCE8E6 {
+
+    entity "join_queue" as join_queue {
+        * id : INTEGER <<PK>>
+        --
+        * link : TEXT <<U>>
+        * status : TEXT
+        * attempts : INTEGER
+        lastError : TEXT
+        * updatedAt : INTEGER
+    }
+
+    note as N_join_queue_db
+      <b>Назначение.</b> Очередь вступления в discussion-группы каналов.
+      ----
+      <b>Таблицы</b>
+      • join_queue — ссылки на каналы со статус-машиной обработки и ретраями
+    end note
+
+    note bottom of join_queue
+      <b>status</b> · начальный: pending
+      ----
+      • pending — ожидает обработки
+      • processing — взят в батч (таймаут возвращает в pending)
+      • joined — успешно вступили
+      • skipped — пропущен (нет discussion-группы и т.п.)
+      • error — ошибка, повтор до MAX_ATTEMPTS
+      ----
+      <b>Переходы:</b> pending → processing → joined | skipped | error
+      Полная машина переходов — в join-queue.ts.
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' tasks.db (per-agent) — tasksDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "tasks.db  (per-agent)" #F3E8FD {
+
+    entity "tasks" as tasks {
+        * agentId : TEXT <<PK>>
+        * type : TEXT <<PK>>
+        --
+        * schedule : TEXT (cron)
+        * tz : TEXT
+        lastRun : INTEGER
+        * nextRun : INTEGER
+        * enabled : INTEGER
+    }
+
+    entity "runs" as runs {
+        * id : INTEGER <<PK>>
+        --
+        * agentId : TEXT
+        * type : TEXT
+        * startedAt : INTEGER
+        * durationMs : INTEGER
+        * status : TEXT
+        error : TEXT
+        * llmCalls : INTEGER
+        * createdAt : INTEGER
+    }
+
+    note as N_tasks_db
+      <b>Назначение.</b> Планировщик агента: расписание задач и журнал прогонов.
+      ----
+      <b>Таблицы</b>
+      • tasks — расписание задач-скиллов (cron + tz, enabled = 0|1)
+      • runs — журнал прогонов: исход, длительность, число LLM-вызовов
+    end note
+
+    note bottom of runs
+      <b>status</b> · начального нет (ставится при записи прогона)
+      ----
+      • success — прогон завершился успешно
+      • error — прогон упал (текст в поле error)
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' funnel.db (admin-only) — funnelDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "funnel.db  (admin-only)" #E0F7FA {
+
+    entity "channel_snapshots" as snapshots {
+        * id : INTEGER <<PK>>
+        --
+        * agent_id : TEXT
+        * snapped_at : INTEGER
+        public_channel_subs : INTEGER
+        post_id : INTEGER
+        post_views : INTEGER
+        private_pending_requests : INTEGER
+    }
+
+    entity "daily_stats" as daily_stats {
+        * date : TEXT <<PK>>
+        * agent_id : TEXT <<PK>>
+        --
+        * group_replies : INTEGER
+        * dms_sent : INTEGER
+        post_views_delta : INTEGER
+        post_views_abs : INTEGER
+        public_subs_delta : INTEGER
+        public_subs_abs : INTEGER
+        private_requests_delta : INTEGER
+        private_requests_abs : INTEGER
+    }
+
+    note as N_funnel_db
+      <b>Назначение.</b> Воронка платформы (только у админ-агента).
+      ----
+      <b>Таблицы</b>
+      • channel_snapshots — сырые дневные снапшоты метрик каналов
+      • daily_stats — дневные агрегаты: дельта + абсолют по agent_id
+      ----
+      <b>Статусов нет.</b> Дельта = разность с предыдущим снапшотом того же agent_id.
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' discovery.db (admin-only) — discoveryDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "discovery.db  (admin-only)" #FFF0F0 {
+
+    entity "discovered_channels" as discovered {
+        * canonical_link : TEXT <<PK>>
+        --
+        * assigned_agent : TEXT
+        * added_at : INTEGER
+    }
+
+    note as N_discovery_db
+      <b>Назначение.</b> Реестр найденных каналов на всю платформу (только у админ-агента).
+      ----
+      <b>Таблицы</b>
+      • discovered_channels — дедуп по канонической ссылке (PK), назначение каналу агента
+      ----
+      <b>Статусов нет.</b> Инвариант «один канал — один агент навсегда» держится на PK.
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' Связи
+' ─────────────────────────────────────────────────────────────────────
+
+' Единственный реальный FK (в пределах одного файла):
+gtam }o--|| group_threads : threadId → id
+
+' Логические связи по agent_id (один файл funnel.db, без FK):
+daily_stats }o..o{ snapshots : agent_id
+
+' Логические межтабличные связи внутри tg-channels.db (по chatId / userId, без FK):
+dm_candidates }o..|| channels : sourceChatId → chatId
+dm_history    }o..o{ dm_candidates : userId
+
+' Логические межфайловые связи (FK невозможны — разные файлы SQLite):
+replies        }o..|| channels : chatId
+group_threads  }o..|| channels : chatId
+dm_threads     }o..o{ dm_candidates : userId
+runs           }o..|| tasks : (agentId, type)
+
+legend right
+  | Обозначение | Значение |
+  | <<PK>> | первичный ключ |
+  | <<U>>  | UNIQUE |
+  | <<FK>> | внешний ключ |
+  | сплошная линия | FK в пределах файла |
+  | пунктир | логическая связь (FK нет: разные файлы / по соглашению) |
+  | per-agent | файл у каждого агента |
+  | admin-only | файл только у админ-агента (agent1) |
+endlegend
+
+@enduml
