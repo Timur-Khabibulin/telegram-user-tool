@@ -32,7 +32,7 @@ import {
 } from "../core/db/channels";
 import { getAgentSentMessageIds, saveReply } from "../core/db/replies";
 import { cacheChannelIdentities } from "../core/channel-sync";
-import { fetchLastPostInDateRange } from "../core/channel-preview/preview";
+import { fetchLastPostInDateRange } from "../features/channel-preview/preview";
 import { applyApprovedComment, handlePostCommentSendError } from "../core/post-comment-send";
 import { sendNotifyMessage } from "../core/review-bot-api";
 import {

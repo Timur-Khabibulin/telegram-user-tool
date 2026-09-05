@@ -528,7 +528,7 @@ export function analyzePosts(postsBlock: string): string {
  * Компактный переносимый профиль канала (channel-context) — вторая версия
  * промпта. В отличие от первой (свободный размеченный текст, 13 секций),
  * результат — валидный JSON по фиксированной схеме (см. `channelContextSchema`
- * в `core/channel-context/run.ts`, вызывается через `llm.completeObject`, не
+ * в `features/channel-context/run.ts`, вызывается через `llm.completeObject`, не
  * `complete`): только устойчивые, отличительные признаки, полезные при оценке
  * будущих постов, а не подробный обзор канала. `pinnedText` — отдельный блок
  * данных (может быть пустой строкой — закрепа нет или он не получен, не

@@ -1,4 +1,4 @@
-// scripts/channel-metrics.ts — CLI-вход для core/channel-metrics/run.ts.
+// scripts/channel-metrics.ts — CLI-вход для features/channel-metrics/run.ts.
 //
 // Ручной операторский инструмент (не dispatcher/systemd): читает CSV со списком
 // ссылок (колонка `link`), для каждой через MTProto одной сессии агента считает
@@ -20,7 +20,7 @@
 import * as fs from "fs";
 
 import type { Logger } from "../core/logger";
-import { runChannelMetrics, readCsvRows } from "../core/channel-metrics/run";
+import { runChannelMetrics, readCsvRows } from "../features/channel-metrics/run";
 import { createLlmClient } from "../llm/client";
 
 const log: Logger = {

@@ -9,7 +9,7 @@
 // Источник кандидатов — GET /proxy/search (готовый инвентарь аккаунта по стране, без
 // state/city — см. mobile-proxy-unique-exit-ip/design.md): кандидаты не создаются и не
 // удаляются на стороне asocks, только берутся по одному из уже полученного списка. Уникальность
-// между агентами — сверкой по логину (`core/proxy/proxy-pool.ts`), не сетевой проверкой IP.
+// между агентами — сверкой по логину (`features/proxy/proxy-pool.ts`), не сетевой проверкой IP.
 //
 // tg-account.json агента изменяется ТОЛЬКО при подтверждённом успехе — проверка кандидата идёт
 // через override TelegramService.verifyConnection (в памяти, ничего не пишет на диск, пока не
@@ -27,8 +27,8 @@ import * as fs from "fs";
 import type { Logger } from "../core/logger";
 import { TelegramService } from "../core/telegram/service";
 import { accountConfigPath, loadAccountConfig, type ProxyConfig } from "../core/config";
-import { fetchAvailableMobileProxies, createProxyPicker } from "../core/proxy/proxy-pool";
-import type { MobileProxyCandidate } from "../core/proxy/asocks-client";
+import { fetchAvailableMobileProxies, createProxyPicker } from "../features/proxy/proxy-pool";
+import type { MobileProxyCandidate } from "../features/proxy/asocks-client";
 import { ConnectTimeoutError } from "../core/telegram/errors";
 
 const log: Logger = {

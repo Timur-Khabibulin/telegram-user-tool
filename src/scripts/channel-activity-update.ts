@@ -50,7 +50,7 @@ import {
     type ChannelForActivityUpdate,
     type ChannelForAvgUpdate,
 } from "../core/db/channels";
-import { activityWindow, ActivityAccumulator } from "../core/activity-percentile";
+import { activityWindow, ActivityAccumulator } from "../features/activity-percentile";
 import { sleep, sleepRandom } from "../skills/util";
 import * as fs from "fs";
 import { normalizeChannelLink } from "../core/db/discovery";

@@ -7,7 +7,7 @@
 
 import { TelegramService } from "../core/telegram/service";
 import { loadAccountConfig } from "../core/config";
-import { createMobileProxy, deleteProxyByName } from "../core/proxy/asocks-client";
+import { createMobileProxy, deleteProxyByName } from "../features/proxy/asocks-client";
 
 const t0 = Date.now();
 const ts = () => `+${((Date.now() - t0) / 1000).toFixed(1)}s`;

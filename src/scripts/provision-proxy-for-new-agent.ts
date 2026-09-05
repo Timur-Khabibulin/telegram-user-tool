@@ -9,7 +9,7 @@
 // Источник кандидатов — GET /proxy/search (готовый инвентарь аккаунта по стране, без
 // state/city): кандидаты не создаются и не удаляются на стороне asocks, только берутся по
 // одному из уже полученного списка. Уникальность между агентами — сверкой по логину
-// (core/proxy/proxy-pool.ts): исключаются логины, уже занятые на диске другими агентами, и
+// (features/proxy/proxy-pool.ts): исключаются логины, уже занятые на диске другими агентами, и
 // логины, явно переданные через --exclude (отвергнутые в более ранних попытках ЭТОГО ЖЕ
 // создания агента — режим --create-candidate стateless, каждый вызов — новый процесс, поэтому
 // список отвергнутых передаёт вызывающая сторона, см. proxy-selection.ts).
@@ -45,8 +45,8 @@
 import type { Logger } from "../core/logger";
 import { TelegramService } from "../core/telegram/service";
 import type { ProxyConfig } from "../core/config";
-import { listCountries } from "../core/proxy/asocks-client";
-import { fetchAvailableMobileProxies } from "../core/proxy/proxy-pool";
+import { listCountries } from "../features/proxy/asocks-client";
+import { fetchAvailableMobileProxies } from "../features/proxy/proxy-pool";
 import { ConnectTimeoutError } from "../core/telegram/errors";
 
 const log: Logger = {
