@@ -1,4 +1,4 @@
-// core/tg-agent-autoregistration/proxy-selection.ts — подбор мобильного прокси (R-1, R-12).
+// features/tg-agent-autoregistration/proxy-selection.ts — подбор мобильного прокси (R-1, R-12).
 //
 // provision-proxy-for-new-agent.ts переиспользуется без изменений в контракте вызова —
 // вызывается подпроцессом в режиме --create-candidate (mobile-proxy-unique-exit-ip: кандидаты
@@ -14,9 +14,9 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
 import * as path from "path";
-import type { Logger } from "../logger";
-import type { ProxyConfig } from "../config";
-import { TdataConnectError } from "../tdata";
+import type { Logger } from "../../core/logger";
+import type { ProxyConfig } from "../../core/config";
+import { TdataConnectError } from "../../core/tdata";
 
 const execFileAsync = promisify(execFile);
 

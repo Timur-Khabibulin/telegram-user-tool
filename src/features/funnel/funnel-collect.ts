@@ -1,4 +1,4 @@
-// core/funnel-collect.ts — общее ядро сбора метрик воронки (funnel-tracking).
+// features/funnel/funnel-collect.ts — общее ядро сбора метрик воронки (funnel-tracking).
 //
 // Используется в двух режимах на одном коде (design.md §Decisions 8):
 //   • persist=true  — таймерный прогон: пишет channel_snapshots + daily_stats
@@ -18,21 +18,21 @@
 import * as fs from "fs";
 import Database from "better-sqlite3";
 
-import { listAgentIds, repliesDbPath, REPORT_AGENT_ID } from "./config";
-import { getChannelSendBreakdown } from "./db/replies";
-import { isAgentActive } from "./db/tasks";
-import { listPrivateInviteLinks } from "./db/private-invites";
-import { getAgentPool } from "./db/discovery";
+import { listAgentIds, repliesDbPath, REPORT_AGENT_ID } from "../../core/config";
+import { getChannelSendBreakdown } from "../../core/db/replies";
+import { isAgentActive } from "../../core/db/tasks";
+import { listPrivateInviteLinks } from "../../core/db/private-invites";
+import { getAgentPool } from "../../core/db/discovery";
 import { startOfUtcPlus5Day, type DayWindow } from "./runs-summary";
-import type { TelegramService } from "./telegram/service";
-import type { Logger } from "./logger";
+import type { TelegramService } from "../../core/telegram/service";
+import type { Logger } from "../../core/logger";
 import {
     getPreviousSnapshot,
     hasSnapshotForDay,
     insertSnapshot,
     upsertDailyStats,
     type SnapshotRow,
-} from "./db/funnel";
+} from "../../core/db/funnel";
 import {
     countChannels,
     countVisitsToday,
@@ -47,8 +47,8 @@ import {
     countChannelsSuspendedInWindow,
     type SendErrorBreakdownRow,
     type ProblemChannelRow,
-} from "./db/channels";
-import { listRestrictionsSince, getActiveRestriction, type RestrictionType } from "./db/agent-restrictions";
+} from "../../core/db/channels";
+import { listRestrictionsSince, getActiveRestriction, type RestrictionType } from "../../core/db/agent-restrictions";
 
 // ─── Types ────────────────────────────────────────────────────────────
 

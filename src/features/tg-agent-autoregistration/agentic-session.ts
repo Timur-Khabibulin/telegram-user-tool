@@ -1,4 +1,4 @@
-// core/tg-agent-autoregistration/agentic-session.ts — вторая (агентская) MTProto-сессия.
+// features/tg-agent-autoregistration/agentic-session.ts — вторая (агентская) MTProto-сессия.
 //
 // Регистрируется отдельно от bootstrap-сессии, общими apiId/apiHash персоны
 // (R-D1). Код авторизации приходит на ещё активное bootstrap-соединение —
@@ -7,10 +7,10 @@
 // активными на аккаунте.
 
 import type { TelegramClient } from "telegram";
-import type { Logger } from "../logger";
-import { TelegramService } from "../telegram/service";
-import { readIncomingCode } from "../tdata";
-import type { ProxyConfig } from "../config";
+import type { Logger } from "../../core/logger";
+import { TelegramService } from "../../core/telegram/service";
+import { readIncomingCode } from "../../core/tdata";
+import type { ProxyConfig } from "../../core/config";
 
 /** R-D5: фиксированная константа, не параметр запуска. */
 export const READ_INCOMING_CODE_TIMEOUT_MS = 2 * 60_000;

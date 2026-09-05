@@ -1,4 +1,4 @@
-// core/tg-agent-autoregistration/persona-template.ts — шаблон персоны (R-D1).
+// features/tg-agent-autoregistration/persona-template.ts — шаблон персоны (R-D1).
 //
 // Шаблон читается один раз на весь прогон (одна персона на пачку аккаунтов, R из
 // requirements-v1.md §2.1). Отсутствие папки/обязательного файла — не повод падать
@@ -8,7 +8,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { personasRoot } from "../config";
+import { personasRoot } from "../../core/config";
 
 export function autoregistrationRoot(): string {
     return path.join(os.homedir(), ".openclaw", "tg-agent-autoregistration");

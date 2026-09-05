@@ -1,6 +1,6 @@
-// core/tg-agent-autoregistration/id-range.ts — проверка диапазона agentId (R-8, R-11).
+// features/tg-agent-autoregistration/id-range.ts — проверка диапазона agentId (R-8, R-11).
 
-import { listAgentIds } from "../config";
+import { listAgentIds } from "../../core/config";
 import { listStagingAgentIds } from "./staging";
 
 /** N = число ссылок в megaLinks; agentId по порядку — <prefix>startAgentNumber..+N-1 (R-11). */

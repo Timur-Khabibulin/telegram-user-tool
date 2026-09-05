@@ -1,4 +1,4 @@
-// core/funnel-report.ts — рендер отчёта-воронки (funnel-tracking, этапы 1-7).
+// features/funnel/funnel-report.ts — рендер отчёта-воронки (funnel-tracking, этапы 1-7).
 //
 // Отчёт состоит из двух частей (см. docs/design/funnel-tracking/funnel-tracking-v2.md §3,
 // docs/design/funnel-tracking/architecture-v3.md):
@@ -21,7 +21,7 @@ import * as path from "path";
 
 import type { FunnelResult, AgentFunnelRow } from "./funnel-collect";
 import type { DayWindow } from "./runs-summary";
-import { reportsDir } from "./config";
+import { reportsDir } from "../../core/config";
 
 const NBSP = " ";
 

@@ -1,4 +1,4 @@
-// core/tg-agent-autoregistration/username.ts — генерация username аккаунта (R-4).
+// features/tg-agent-autoregistration/username.ts — генерация username аккаунта (R-4).
 //
 // nick из profile_data.json — общий префикс на всю персону; постфикс — случайный
 // человекочитаемый (слово + двузначное число, не hex/hash-подобный), чтобы аккаунты

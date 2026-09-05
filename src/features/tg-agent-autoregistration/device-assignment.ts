@@ -1,4 +1,4 @@
-// core/tg-agent-autoregistration/device-assignment.ts — назначение реального,
+// features/tg-agent-autoregistration/device-assignment.ts — назначение реального,
 // не пересекающегося с другими агентами устройства новому агенту (R-D1 расширение).
 //
 // Назначение персистится в стейджинге (`device.json`, рядом с `status.json`/`tdata/`)
@@ -9,8 +9,8 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { pickDevice, usedComboCounts } from "../device-pool";
-import type { DeviceConfig } from "../config";
+import { pickDevice, usedComboCounts } from "../../core/device-pool";
+import type { DeviceConfig } from "../../core/config";
 import { stagingDir } from "./staging";
 
 function stagingDevicePath(agentId: string): string {

@@ -1,4 +1,4 @@
-// core/tg-agent-autoregistration/staging.ts — стейджинг вне workspace-* (R-7, R-D3, R-D4).
+// features/tg-agent-autoregistration/staging.ts — стейджинг вне workspace-* (R-7, R-D3, R-D4).
 //
 // До статуса done данные аккаунта живут здесь, не в workspace-<agentId>/ — сам факт
 // существования workspace-* делает агента видимым для listAgentIds() и, соответственно,
@@ -8,7 +8,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { workspaceDir, type AccountConfig } from "../config";
+import { workspaceDir, type AccountConfig } from "../../core/config";
 import { autoregistrationRoot } from "./persona-template";
 
 export function stagingRoot(): string {

@@ -1,4 +1,4 @@
-// core/tg-agent-autoregistration/run.ts — Main (роль на диаграмме): единая точка
+// features/tg-agent-autoregistration/run.ts — Main (роль на диаграмме): единая точка
 // входа всего прогона, детерминированный код без LLM-цикла (design.md D1).
 // Аккаунты обрабатываются последовательно (constraint 2.2.1) — один за другим,
 // ошибка одного не останавливает пачку.
@@ -6,14 +6,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import { File as MegaFile } from "megajs";
-import type { Logger } from "../logger";
-import type { AccountConfig, DeviceConfig } from "../config";
+import type { Logger } from "../../core/logger";
+import type { AccountConfig, DeviceConfig } from "../../core/config";
 import { loadPersonaTemplate, PersonaTemplateError, type PersonaTemplate } from "./persona-template";
 import { computeAgentIdRange, checkAgentIdRangeFree } from "./id-range";
 import { stagingTdataDir, writeStagingStatus, readStagingStatus, promoteToWorkspace, type AccountStatus } from "./staging";
 import { assignDeviceForAgent, clearStagedDevice } from "./device-assignment";
-import type { ProxyConfig } from "../config";
-import { readTdataAccountInfo, connectBootstrap, prepareAccount, TdataSetupError } from "../tdata";
+import type { ProxyConfig } from "../../core/config";
+import { readTdataAccountInfo, connectBootstrap, prepareAccount, TdataSetupError } from "../../core/tdata";
 import { assignUsernameForAgent, clearStagedUsername } from "./username";
 import { selectWorkingProxy, type ProxySelectionOutcome } from "./proxy-selection";
 import { registerAgenticSession, type AgenticSessionOutcome } from "./agentic-session";
