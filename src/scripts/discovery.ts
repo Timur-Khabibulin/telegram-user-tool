@@ -1,6 +1,6 @@
 // scripts/discovery.ts — запуск прогона channel-discovery вручную / из таймера.
 //
-// Тонкая обёртка над core/discovery/run: парсит аргументы, запускает прогон,
+// Тонкая обёртка над features/discovery/run: парсит аргументы, запускает прогон,
 // печатает отчёт. Та же логика доступна интерактивно тулом discovery_run.
 // Вступление НЕ запускаем — его инициирует per-agent таймер join-queue.
 //
@@ -9,7 +9,7 @@
 
 import type { Logger } from "../core/logger";
 import { FUNNEL_ADMIN_AGENT_ID, listAgentIds, TGSTAT_API_TOKEN } from "../core/config";
-import { runDiscovery, renderReport } from "../core/discovery/run";
+import { runDiscovery, renderReport } from "../features/discovery/run";
 import { TelegramService } from "../core/telegram/service";
 
 const log: Logger = {

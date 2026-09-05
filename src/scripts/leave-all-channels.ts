@@ -17,7 +17,7 @@ import { formatError } from "../core/errors";
 import { TelegramService } from "../core/telegram/service";
 import { ClientNotConnectedError, SessionRevokedError, AccountBannedError } from "../core/telegram/errors";
 import { listAgentIds, REPORT_AGENT_ID } from "../core/config";
-import { withTimeout } from "../core/funnel-collect";
+import { withTimeout } from "../features/funnel/funnel-collect";
 import { sleep, randomDelayMs, FloodAbortError, withFloodRetry } from "../skills/util";
 
 // "Немой" зависший прокси не рвёт соединение ошибкой и не подчиняется таймауту

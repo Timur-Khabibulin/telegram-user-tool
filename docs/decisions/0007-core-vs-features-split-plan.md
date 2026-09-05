@@ -7,6 +7,17 @@
 Прямой фикс (не OpenSpec change) — поведение системы не меняется, меняется
 только структура кода.
 
+## Известное отклонение от целевой архитектуры (единица 8)
+
+При переносе `tg-agent-autoregistration/` обнаружено: `src/core/telegram/service.ts`,
+`src/core/tdata/account-setup.ts`, `src/core/device-pool.ts` и (пока не
+перенесённый) `src/core/tg-agent-reauth-from-tdata/run.ts` импортируют
+`persona-template.ts`/`staging.ts`/`agentic-session.ts` изнутри этой фичи.
+После переноса это станет зависимостью `core/` → `features/` — обратное
+направление относительно цели ADR 0007. Это ровно случай решения №1
+(«общие файлы сейчас не выносим») — принято как временное отклонение,
+пересмотр (вынос этих файлов в `core/`) — отдельная задача на будущее.
+
 ## Зафиксированные решения по объёму
 
 1. `agentic-session.ts`/`persona-template.ts` в `core/` не выносим —
@@ -40,10 +51,10 @@
 | 4 | `channel-metrics/` | index.ts + скрипт | нет упоминаний вовне | готово |
 | 5 | `channel-analysis/` | index.ts | нет упоминаний вовне | готово |
 | 6 | `channel-context/` | index.ts + скилл | нет упоминаний вовне | готово |
-| 7 | `discovery/` | index.ts + неск. скриптов | `docs/design/channel-discovery-similar/*.md`, `docs/design/universal-script-control/architecture.md`, `openspec/specs/similar-channel-discovery`, `channel-discovery` | не начато |
-| 8 | `tg-agent-autoregistration/` | index.ts + 2 скрипта | `docs/design/tg-agent-autoregistration/architecture.md` | не начато |
-| 9 | `tg-agent-reauth-from-tdata/` | index.ts (зависит от уже перенесённого №8) | нет прямых упоминаний | не начато |
-| 10 | `funnel/` (`funnel-collect.ts`+`funnel-report.ts`+`runs-summary.ts`) | index.ts + скрипты | `docs/design/funnel-tracking/*.md`, `docs/design/funnel-potential-reach/*.md`, **`openspec/specs/daily-summary/spec.md`** (нормативная ссылка на функцию) | не начато |
+| 7 | `discovery/` | index.ts + неск. скриптов | `docs/design/channel-discovery-similar/*.md`, `docs/design/universal-script-control/architecture.md`, `openspec/specs/similar-channel-discovery`, `channel-discovery` | готово |
+| 8 | `tg-agent-autoregistration/` | index.ts + 2 скрипта + 4 обратные зависимости из core/ | `docs/design/tg-agent-autoregistration/architecture.md` | готово |
+| 9 | `tg-agent-reauth-from-tdata/` | index.ts (зависит от уже перенесённого №8) | нет прямых упоминаний | готово |
+| 10 | `funnel/` (`funnel-collect.ts`+`funnel-report.ts`+`runs-summary.ts`) | index.ts + скрипты + `features/activity-percentile.ts` | `docs/design/funnel-tracking/*.md`, `docs/design/funnel-potential-reach/*.md`, **`openspec/specs/daily-summary/spec.md`** (нормативная ссылка на функцию) | готово |
 
 ## После всех 10 единиц
 

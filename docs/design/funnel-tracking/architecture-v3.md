@@ -485,7 +485,7 @@ export async function collectFunnel(tg, opts, log): Promise<FunnelResult> {
 
 Ничего нового не вводится: разбивка US-5 использует тот же `window:
 DayWindow` (`startSec`/`endSec` из `finishedDayWindow()`/`startOfUtcPlus5Day`,
-`core/runs-summary.ts`), что и все остальные показатели отчёта — то же окно,
+`features/funnel/runs-summary.ts`), что и все остальные показатели отчёта — то же окно,
 которым уже фильтруется `channel_visits`/`send_errors`/`replies` в
 architecture-v2. Отдельного понятия границы дня для новой разбивки не
 заводится.
@@ -502,8 +502,8 @@ architecture-v2. Отдельного понятия границы дня дл�
 | `core/db/funnel.ts` | без изменений схемы — используется полнее (per-agent запись частных полей без условия) |
 | `core/db/private-invites.ts` | без изменений — используется как есть (`listPrivateInviteLinks`) |
 | `core/telegram/service.ts` | `getPendingJoinRequests` — новый опциональный `opts.link`; `listGroupChannels` — возвращает `{title, username}` вместо `title` |
-| `core/funnel-collect.ts` | фильтр активных агентов в начале; блок заявок — цикл по ссылкам вместо одного вызова; снятие условия `agentId === adminAgentId`; сборка `channelBreakdown`/`channelsWithSending`; `dmsSent` больше не читается из `dm_history` |
-| `core/funnel-report.ts` | убрать `fmtActive`/медиану; столбец «Заяв» в тексте + Итого; убрать строку-дубликат заявок (кроме `privateNote`); вторая таблица в CSV + `csvEscapeField`; переименование `сообщений_отправлено`→`каналов_с_отправкой` |
+| `features/funnel/funnel-collect.ts` | фильтр активных агентов в начале; блок заявок — цикл по ссылкам вместо одного вызова; снятие условия `agentId === adminAgentId`; сборка `channelBreakdown`/`channelsWithSending`; `dmsSent` больше не читается из `dm_history` |
+| `features/funnel/funnel-report.ts` | убрать `fmtActive`/медиану; столбец «Заяв» в тексте + Итого; убрать строку-дубликат заявок (кроме `privateNote`); вторая таблица в CSV + `csvEscapeField`; переименование `сообщений_отправлено`→`каналов_с_отправкой` |
 | `scripts/funnel-tracker.ts` | без изменений — читает `FunnelResult`/CSV-строку как есть |
 
 ---

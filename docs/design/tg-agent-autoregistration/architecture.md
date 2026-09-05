@@ -15,7 +15,7 @@ Design-doc (HOW). Источник требований (ЧТО) — [requiremen
 
 `Main` (сценарий) реализуется как **один** OpenClaw-тул в корневом `index.ts`,
 делегирующий прямым вызовом функции (не подпроцессом, не LLM-циклом) в новый модуль
-`src/core/tg-agent-autoregistration/run.ts` — по образцу `dispatcher.ts`/
+`src/features/tg-agent-autoregistration/run.ts` — по образцу `dispatcher.ts`/
 `provision-mobile-proxy.ts`/`import-agent-pool.ts` (детерминированные one-shot скрипты),
 а не по образцу `tg-agent-create*` (гранулярные тулы, которые LLM-агент ведёт пошагово
 по `SKILL.md`). Причина: весь процесс (R-1…R-12 требований) детерминирован, ни на одном
@@ -161,7 +161,7 @@ const stringSession = convertToGramjsSession(data)        // готово для
 
 | Компонент | Расположение | Роль |
 |---|---|---|
-| `Main` | `src/core/tg-agent-autoregistration/run.ts` (новый) | вся логика: R-8/R-10/R-11 на старте, цикл по аккаунтам, стейджинг, обе сессии, итоговый отчёт |
+| `Main` | `src/features/tg-agent-autoregistration/run.ts` (новый) | вся логика: R-8/R-10/R-11 на старте, цикл по аккаунтам, стейджинг, обе сессии, итоговый отчёт |
 | CLI-двойник | `src/scripts/tg-agent-autoregistration.ts` (новый) | тонкая обёртка над `run.ts`, по паттерну `core/+scripts/` остального репозитория |
 | OpenClaw-тул | `index.ts` (корень, +1 регистрация) | `execute()` делегирует в `run.ts` напрямую, без LLM-цикла |
 | `TData` | `src/core/tdata/` (новый) | `@mtcute/convert` (раздел 2.1) + методы аккаунта (раздел 2.3) + очистка предыдущего состояния (раздел 2.4) — этой логики сейчас нет нигде в `src/core/telegram/service.ts`, пишется с нуля |
@@ -177,7 +177,7 @@ Node/TS-кода. Единственная новая запись в `package.j
 
 ## 4. Открыто (сознательно не спроектировано здесь)
 
-- Точные TS-интерфейсы/сигнатуры функций `core/tg-agent-autoregistration/run.ts` и
+- Точные TS-интерфейсы/сигнатуры функций `features/tg-agent-autoregistration/run.ts` и
   `core/tdata/` — не фиксировались в разговоре, будут определены при реализации.
 - Каталог доменных ошибок `@mtcute/convert` (бросает ли `convertFromTdata` различимые
   исключения, которые ложатся на статусы R-1/R-9, или их нужно классифицировать

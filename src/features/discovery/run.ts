@@ -1,4 +1,4 @@
-// core/discovery/run.ts — оркестрация прогона channel-discovery.
+// features/discovery/run.ts — оркестрация прогона channel-discovery.
 //
 // Инкрементальный отбор: по ключевым словам ищем каналы в TGStat → дедуп против
 // реестра → гейт по подписчикам → round-robin раскладка по агентам →
@@ -9,11 +9,11 @@
 // Используется и тонким скриптом scripts/discovery.ts, и тулом discovery_run.
 // Design: docs/design/channel-discovery/channel-discovery-v1.md.
 
-import type { Logger } from "../logger";
-import { normalizeChannelLink, isKnownChannel, registerChannel } from "../db/discovery";
+import type { Logger } from "../../core/logger";
+import { normalizeChannelLink, isKnownChannel, registerChannel } from "../../core/db/discovery";
 import { searchChannels, getChannelStat } from "./tgstat";
-import { addJoinQueue } from "../db/join-queue";
-import type { TelegramService } from "../telegram/service";
+import { addJoinQueue } from "../../core/db/join-queue";
+import type { TelegramService } from "../../core/telegram/service";
 
 export interface RunParams {
     keywords: string[];

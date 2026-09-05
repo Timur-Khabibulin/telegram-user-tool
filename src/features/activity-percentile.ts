@@ -9,7 +9,7 @@
 // (ACTIVITY_CACHE_TTL_SECONDS в channel-activity-update.ts), как у avg_views/
 // subs_count — окно данных и частота пересчёта не обязаны совпадать.
 
-import { startOfUtcPlus5Day } from "../core/runs-summary";
+import { startOfUtcPlus5Day } from "./funnel/runs-summary";
 
 const DAY_SECONDS = 86400;
 const WINDOW_DAYS = 7;

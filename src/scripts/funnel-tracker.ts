@@ -14,11 +14,11 @@ import * as path from "path";
 
 import type { Logger } from "../core/logger";
 import { TelegramService } from "../core/telegram/service";
-import { finishedDayWindow } from "../core/runs-summary";
+import { finishedDayWindow } from "../features/funnel/runs-summary";
 import { FUNNEL_ADMIN_AGENT_ID, FUNNEL_PRIVATE_CHANNEL_ID, REPORT_AGENT_ID } from "../core/config";
 import { ensureFunnelSchema } from "../core/db/funnel";
-import { collectFunnel, withTimeout } from "../core/funnel-collect";
-import { renderFunnel, buildFunnelCsv, funnelCsvPath } from "../core/funnel-report";
+import { collectFunnel, withTimeout } from "../features/funnel/funnel-collect";
+import { renderFunnel, buildFunnelCsv, funnelCsvPath } from "../features/funnel/funnel-report";
 
 const log: Logger = {
     info: (m) => console.log(m),

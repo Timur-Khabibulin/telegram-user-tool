@@ -18,7 +18,7 @@ import bigInt from "big-integer";
 import { TelegramClient, Api, utils } from "telegram";
 import { CustomFile } from "telegram/client/uploads";
 import type { Logger } from "../logger";
-import type { PersonaTemplate } from "../tg-agent-autoregistration/persona-template";
+import type { PersonaTemplate } from "../../features/tg-agent-autoregistration/persona-template";
 import { TdataSetupError } from "./errors";
 
 /** Оборачивает Telegram RPC-ошибку в TdataSetupError с сохранением исходного кода (4.7). */

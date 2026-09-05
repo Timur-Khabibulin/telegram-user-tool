@@ -21,7 +21,7 @@
 
 import * as fs from "fs";
 import { listAgentIds, accountConfigPath } from "./config";
-import { listStagingAgentIds, stagingDir } from "./tg-agent-autoregistration/staging";
+import { listStagingAgentIds, stagingDir } from "../features/tg-agent-autoregistration/staging";
 import * as path from "path";
 
 export interface DeviceProfile {

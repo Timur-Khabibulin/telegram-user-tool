@@ -1,4 +1,4 @@
-// core/tg-agent-reauth-from-tdata/run.ts — реавторизация СУЩЕСТВУЮЩЕГО агента
+// features/tg-agent-reauth-from-tdata/run.ts — реавторизация СУЩЕСТВУЮЩЕГО агента
 // через уже имеющуюся у него tdata-сессию (openspec/changes/tg-agent-reauth-from-tdata).
 //
 // В отличие от tg-agent-autoregistration (создание НОВОГО агента), здесь НЕ вызывается
@@ -12,12 +12,12 @@ import * as fs from "fs";
 import * as path from "path";
 import type { TelegramClient } from "telegram";
 
-import type { Logger } from "../logger";
-import { accountConfigPath, loadAccountConfig, tdataPath, FUNNEL_ADMIN_AGENT_ID } from "../config";
-import { connectBootstrap, readTdataAccountInfo } from "../tdata";
+import type { Logger } from "../../core/logger";
+import { accountConfigPath, loadAccountConfig, tdataPath, FUNNEL_ADMIN_AGENT_ID } from "../../core/config";
+import { connectBootstrap, readTdataAccountInfo } from "../../core/tdata";
 import { registerAgenticSession } from "../tg-agent-autoregistration/agentic-session";
 import { templatesDir } from "../tg-agent-autoregistration/persona-template";
-import { clearRestriction } from "../db/agent-restrictions";
+import { clearRestriction } from "../../core/db/agent-restrictions";
 
 /** Шаблон персоны, чей 2FA-пароль пробуется по умолчанию (design.md D3) — единственный
  *  шаблон на платформе на момент этого change; агенты, о которых идёт речь (созданные

@@ -74,8 +74,8 @@ agent2     95     6      2     9   41200
 |---|---|---|
 | `src/core/db/channels.ts` | существующий | новая функция `sumAvgViewsForRepliedChannels(agentId, chatIds)` |
 | `src/core/db/replies.ts` | существующий | новая функция `getDistinctRepliedChatIds(agentId, startSec, endSec)` |
-| `src/core/funnel-collect.ts` | существующий | новое поле `potentialReach: number` в `AgentFunnelRow`; сбор в блоке этапов 1-4 |
-| `src/core/funnel-report.ts` | существующий | строка в тексте + столбец в CSV |
+| `src/features/funnel/funnel-collect.ts` | существующий | новое поле `potentialReach: number` в `AgentFunnelRow`; сбор в блоке этапов 1-4 |
+| `src/features/funnel/funnel-report.ts` | существующий | строка в тексте + столбец в CSV |
 
 Все данные берутся из локальных БД агента — MTProto-сессия не нужна.
 

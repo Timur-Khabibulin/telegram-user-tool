@@ -17,8 +17,8 @@ import type { Logger } from "./src/core/logger";
 import { TelegramService } from "./src/core/telegram/service";
 import type { ProxyConfig } from "./src/core/config";
 import { FUNNEL_ADMIN_AGENT_ID, FUNNEL_PRIVATE_CHANNEL_ID, REPORT_AGENT_ID, listAgentIds, reportsDir } from "./src/core/config";
-import { runDiscovery, renderReport } from "./src/core/discovery/run";
-import { runSimilarDiscovery, renderSimilarReport } from "./src/core/discovery/similar";
+import { runDiscovery, renderReport } from "./src/features/discovery/run";
+import { runSimilarDiscovery, renderSimilarReport } from "./src/features/discovery/similar";
 import { runChannelAnalysis, renderStats } from "./src/features/channel-analysis/run";
 import { runChannelContextForAgent, renderChannelContextStats } from "./src/features/channel-context/run";
 import { withLlmLogging } from "./src/core/db/llm-log";
@@ -66,13 +66,13 @@ import {
     triggerActivityUpdate,
 } from "./src/core/scheduler-control";
 import type { TaskType } from "./src/core/db/tasks";
-import { buildDailySummary, currentDayWindow } from "./src/core/runs-summary";
-import { collectFunnel } from "./src/core/funnel-collect";
-import { renderFunnel, buildFunnelCsv, funnelCsvPath } from "./src/core/funnel-report";
+import { buildDailySummary, currentDayWindow } from "./src/features/funnel/runs-summary";
+import { collectFunnel } from "./src/features/funnel/funnel-collect";
+import { renderFunnel, buildFunnelCsv, funnelCsvPath } from "./src/features/funnel/funnel-report";
 import { getAllChannelsWithAvgViews } from "./src/core/db/channels";
 import { runChannelCleanup, type ChannelCleanupParams } from "./src/skills/channel-cleanup";
-import { runAutoregistration, retryManualCode, renderReport as renderAutoregistrationReport } from "./src/core/tg-agent-autoregistration/run";
-import { reauthFromTdata } from "./src/core/tg-agent-reauth-from-tdata/run";
+import { runAutoregistration, retryManualCode, renderReport as renderAutoregistrationReport } from "./src/features/tg-agent-autoregistration/run";
+import { reauthFromTdata } from "./src/features/tg-agent-reauth-from-tdata/run";
 
 // ─── OpenClaw result helpers ──────────────────────────────────────────
 

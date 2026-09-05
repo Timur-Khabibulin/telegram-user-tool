@@ -94,7 +94,7 @@ standalone-скриптов (`dispatcher.ts`, `funnel-tracker.ts`).
 | Кооперативная отмена | сигнатуры core-`run*` (`similar.ts` и др.) | приём токена отмены, проверка в точках цикла и в паузах `pacingMs` (AC-6) |
 | Инструменты гейтвея | `index.ts` | существующие `tg_discovery_similar_run` / `tg_channel_content_analysis` / `tg_discovery_run` становятся **тонкими лаунчерами** (вызывают `startScript`, сразу возвращают id). Добавляются `tg_scripts_running` (AC-4) и `tg_script_stop` (AC-5) |
 
-Логика обхода/анализа (`src/core/discovery/*`, `src/core/channel-analysis/*`) **не
+Логика обхода/анализа (`src/features/discovery/*`, `src/features/channel-analysis/*`) **не
 переписывается под новый запуск** — её вызывают новые точки входа вместо `run()`-обёртки
 гейтвея. Меняется только то, что требует AC-9 (см. §5).
 
@@ -240,7 +240,7 @@ systemctl show <unit> -p ExecMainStartTimestamp --value
 
 ### 5.1 Корень потери (текущее состояние кода)
 
-`src/core/discovery/similar.ts` работает в две фазы:
+`src/features/discovery/similar.ts` работает в две фазы:
 
 - `collectByLevels` копит прошедшие гейты каналы в **in-memory `pool: string[]`**
   (без владельца) — на диск ничего не пишется;

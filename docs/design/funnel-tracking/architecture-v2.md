@@ -11,7 +11,7 @@
 > только модель хранения и точки записи в пайплайне.
 >
 > **Граница:** этапы 5-7 не меняются (см. funnel-tracking-v1.md,
-> `core/db/funnel.ts`, `core/funnel-collect.ts`) — этот документ их не трогает.
+> `core/db/funnel.ts`, `features/funnel/funnel-collect.ts`) — этот документ их не трогает.
 
 ---
 
@@ -58,7 +58,7 @@ export const CHANNEL_CHECK_PERIOD_SECONDS = 259200;
   остаётся только как страховка для прямых вызовов функции вне `monitor.ts`
   (на момент написания таких вызовов нет). При следующем изменении периода
   трогать нужно только `config.ts`.
-- `src/core/funnel-collect.ts` (новый код, см. §5) — формула `activityRate`
+- `src/features/funnel/funnel-collect.ts` (новый код, см. §5) — формула `activityRate`
   использует тот же импорт.
 
 ---
@@ -328,7 +328,7 @@ GROUP BY errorCode
 
 ## 6. Изоляция ошибок в `collectFunnel` — раздельные try/catch
 
-Сейчас (`core/funnel-collect.ts:112-176`) весь сбор по одному агенту — один
+Сейчас (`features/funnel/funnel-collect.ts:112-176`) весь сбор по одному агенту — один
 `try`: локальные SQLite-чтения (`countSince` по `replies`/`dm_history`) и
 MTProto-вызовы (`getOwnPersonalChannel`, `getPostViews`, `getChannelSubsCount`)
 лежат в одном блоке, один `catch` помечает агента целиком `note: "пропущен"`.

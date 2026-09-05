@@ -1,4 +1,4 @@
-// core/discovery/similar.ts — обход графа похожих каналов (channel-discovery-similar v2).
+// features/discovery/similar.ts — обход графа похожих каналов (channel-discovery-similar v2).
 //
 // Две фазы:
 //   1. СБОР — все искатели запускаются одновременно (Promise.all). Каждый держит
@@ -16,14 +16,14 @@
 
 import { z } from "zod";
 
-import type { Logger } from "../logger";
+import type { Logger } from "../../core/logger";
 import type { LlmClient } from "../../llm/client";
 import { scoreTopicRelevance } from "../../llm/prompts";
-import { TelegramService, type ChannelHandle, type ChannelPost } from "../telegram/service";
-import { FloodWaitError, ClientNotConnectedError } from "../telegram/errors";
-import { normalizeChannelLink, isKnownChannel, registerChannel, getUnassignedChannels, assignChannel } from "../db/discovery";
-import { addJoinQueue } from "../db/join-queue";
-import { getAnalysisChannels } from "../db/channels";
+import { TelegramService, type ChannelHandle, type ChannelPost } from "../../core/telegram/service";
+import { FloodWaitError, ClientNotConnectedError } from "../../core/telegram/errors";
+import { normalizeChannelLink, isKnownChannel, registerChannel, getUnassignedChannels, assignChannel } from "../../core/db/discovery";
+import { addJoinQueue } from "../../core/db/join-queue";
+import { getAnalysisChannels } from "../../core/db/channels";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 

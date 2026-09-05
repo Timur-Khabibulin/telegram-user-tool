@@ -5,7 +5,7 @@
 //           --person-name maria --proxy-region us --max-proxy-attempts 5
 
 import type { Logger } from "../core/logger";
-import { retryManualCode } from "../core/tg-agent-autoregistration/run";
+import { retryManualCode } from "../features/tg-agent-autoregistration/run";
 
 const log: Logger = {
     info: (m) => console.error(m),

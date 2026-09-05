@@ -87,7 +87,7 @@ Telegram «похожие каналы»** — как дешёвое допол�
 
 ## 4. Архитектура
 
-**Компоненты.** Логика обхода — в `src/core/discovery/similar.ts` (политика обхода, без
+**Компоненты.** Логика обхода — в `src/features/discovery/similar.ts` (политика обхода, без
 LLM); MTProto-вызовы инкапсулированы в `TelegramService` (`src/core/telegram/service.ts`).
 Реестр найденных каналов и закрепление за агентом — `src/core/db/discovery.ts`
 (`normalizeChannelLink`, `isKnownChannel`, `registerChannel`); постановка в очередь

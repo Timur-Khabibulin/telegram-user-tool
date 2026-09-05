@@ -20,7 +20,7 @@ import type { AccountConfig, ProxyConfig } from "../config";
 import { loadAccountConfig, FUNNEL_ADMIN_AGENT_ID, V5_SYNC_PAGE_SIZE, V5_SYNC_PAGE_DELAY_MIN_SEC, V5_SYNC_PAGE_DELAY_MAX_SEC } from "../config";
 import { upsertRestriction, type RestrictionType } from "../db/agent-restrictions";
 import { GramJsBridgeLogger } from "./gramjs-logger";
-import { loadPersonaTemplate } from "../tg-agent-autoregistration/persona-template";
+import { loadPersonaTemplate } from "../../features/tg-agent-autoregistration/persona-template";
 import { createPersonaChannel } from "../tdata/account-setup";
 import { acquireSession, releaseSession } from "./session-lock";
 export { FloodWaitError, ClientNotConnectedError, MissingAccountConfigError, ConnectTimeoutError, SessionRevokedError, AccountBannedError } from "./errors";

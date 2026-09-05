@@ -1,6 +1,6 @@
 # ТЗ: Гейт кандидатов по ER и avg views — discovery-similar
 
-**Статус: реализовано.** Гейт в коде (`src/core/discovery/similar.ts`). Один
+**Статус: реализовано.** Гейт в коде (`src/features/discovery/similar.ts`). Один
 нюанс по сравнению с этим ТЗ: `getRecentPosts(channel, 20)` для гейта
 вовлечённости и выборка постов для тематического LLM-гейта объединены в один
 вызов на канал, через общий параметр `postsCount` (дефолт 20) — см. п.1 раздела
@@ -8,7 +8,7 @@
 
 ## 1. Контекст и проблема
 
-В пайплайне `collectByLevels` (`src/core/discovery/similar.ts`) кандидат проходит
+В пайплайне `collectByLevels` (`src/features/discovery/similar.ts`) кандидат проходит
 цепочку гейтов:
 
 ```
@@ -140,7 +140,7 @@ Feature: Гейт кандидатов по ER и avg views
 ## 4. Раздел для разработчика
 
 **Файлы:**
-- `src/core/discovery/similar.ts` — основная логика (`collectByLevels`,
+- `src/features/discovery/similar.ts` — основная логика (`collectByLevels`,
   `gatherAndScoreSeeds`, `SimilarParams`, `SkipCounts`)
 - `src/scripts/discovery-similar.ts` — CLI-параметры (`--min-er`,
   `--min-avg-views`), валидация по аналогии с `--theme`/`--agents` (строки 56-71)

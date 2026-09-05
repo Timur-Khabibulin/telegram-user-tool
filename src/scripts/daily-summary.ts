@@ -2,13 +2,13 @@
 // Messages получателя отчётов (run-status-tracking §5).
 //
 // Запускается systemd-таймером раз в день на границе дня UTC+5 (19:00 UTC) и
-// сводит ЗАВЕРШИВШИЙСЯ день. Окно/агрегацию даёт core/runs-summary; здесь —
+// сводит ЗАВЕРШИВШИЙСЯ день. Окно/агрегацию даёт features/funnel/runs-summary; здесь —
 // только разбор --send-as, загрузка аккаунта-получателя и отправка текста.
 // Запуск: `tsx daily-summary.ts --send-as <agentId>` (по умолчанию REPORT_AGENT_ID).
 
 import type { Logger } from "../core/logger";
 import { TelegramService } from "../core/telegram/service";
-import { buildDailySummary, finishedDayWindow } from "../core/runs-summary";
+import { buildDailySummary, finishedDayWindow } from "../features/funnel/runs-summary";
 import { REPORT_AGENT_ID } from "../core/config";
 
 const log: Logger = {

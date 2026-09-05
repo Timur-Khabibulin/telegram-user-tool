@@ -1,4 +1,4 @@
-// core/discovery/tgstat.ts — клиент TGStat для channel-discovery.
+// features/discovery/tgstat.ts — клиент TGStat для channel-discovery.
 //
 // REST API TGStat (GET, токен в query-параметре). Используем два метода:
 //   • channels/search — поиск каналов по ключевому слову (до 100 на запрос).
@@ -6,8 +6,8 @@
 // Названия полей — по документации TGStat (https://api.tgstat.ru/docs/ru), она —
 // источник истины, не память. Детерминированный модуль, без LLM.
 
-import type { Logger } from "../logger";
-import { DISCOVERY_COUNTRY, DISCOVERY_LANGUAGE } from "../config";
+import type { Logger } from "../../core/logger";
+import { DISCOVERY_COUNTRY, DISCOVERY_LANGUAGE } from "../../core/config";
 
 const API_BASE = "https://api.tgstat.ru";
 const SEARCH_LIMIT = 100; // максимум каналов на запрос channels/search (без пагинации)
