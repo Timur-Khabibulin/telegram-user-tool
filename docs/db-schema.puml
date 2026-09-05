@@ -26,6 +26,16 @@ package "tg-channels.db  (per-agent)" #E8F0FE {
         channelAccessHash : TEXT
         channelUsername : TEXT
         * channelResolved : INTEGER
+        status : TEXT
+        statusUpdatedAt : INTEGER
+        lastSeenChannelPostId : INTEGER
+        watchedThreadRootMsgId : INTEGER
+        chatAccessHash : TEXT
+        channel_context : TEXT
+        channel_context_updated_at : INTEGER
+        active_writers_p50 : REAL
+        active_writers_p90 : REAL
+        activity_updated_at : INTEGER
     }
 
     entity "dm_candidates" as dm_candidates {
@@ -58,6 +68,12 @@ package "tg-channels.db  (per-agent)" #E8F0FE {
         status : TEXT
     }
 
+    entity "banned_channels" as banned_channels {
+        * chatId : TEXT <<PK>>
+        --
+        * detectedAt : INTEGER
+    }
+
     note as N_channels_db
       <b>Назначение.</b> Рабочее состояние группового монитора агента.
       ----
@@ -65,6 +81,15 @@ package "tg-channels.db  (per-agent)" #E8F0FE {
       • channels — обойдённые чаты и их период обхода
       • dm_candidates — кандидаты на DM, отобранные из групп
       • dm_history — журнал отправленных DM
+      • banned_channels — очередь каналов на выход (leave-banned-channels)
+    end note
+
+    note bottom of banned_channels
+      <b>Назначение.</b> Очередь работ скилла leave-banned-channels: каналы,
+      где монитор получил CHAT_WRITE_FORBIDDEN.
+      ----
+      <b>Статусов нет.</b> Строка живёт от постановки (enqueueBannedChannel)
+      до обработки (выход из канала + purgeChannelData), затем удаляется.
     end note
 
     note bottom of dm_candidates
@@ -84,6 +109,53 @@ package "tg-channels.db  (per-agent)" #E8F0FE {
       <b>status</b> · начальный: sent
       ----
       • sent — DM отправлен (иных значений код пока не пишет)
+    end note
+
+    note bottom of channels
+      <b>status</b> (telegram-error-handling) · начальный: NULL
+      ----
+      • NULL — обычная работа, ограничений нет
+      • banned — CHAT_WRITE_FORBIDDEN/USER_BANNED_IN_CHANNEL (при отправке).
+        Останавливает обработку канала в monitor-v2 (проверяется перед
+        обработкой). Ставится в banned_channels, снимается только выходом
+        из канала (leave-banned-channels) — статус не сбрасывается.
+      • format_error — CHAT_SEND_PLAIN_FORBIDDEN/CHAT_SEND_MEDIA_FORBIDDEN/
+        ALLOW_PAYMENT_REQUIRED. НЕ останавливает обработку канала.
+        Снятие не определено (открытый вопрос, вне скоупа).
+      • only_comment (channel-post-watch, monitor-v3) — 2 суток после
+        комментария к посту, канал проверяется на новые ответы в ветке
+        (watchedThreadRootMsgId). Переход в sleep — вручную, monitor-v3.
+      • sleep (channel-post-watch, monitor-v3) — ещё 1 сутки после
+        only_comment (итого 3 суток от комментария), канал не проверяется
+        вовсе. Снимается общим механизмом истечения статуса.
+      ----
+      <b>lastSeenChannelPostId</b> (channel-post-watch) — id последнего
+      поста канала (в его собственной нумерации), на который агент
+      отреагировал; не сбрасывается по истечении only_comment/sleep —
+      защита от повторной реакции на тот же пост.
+      <b>watchedThreadRootMsgId</b> (channel-post-watch) — id служебной
+      копии этого поста в чате обсуждения; актуален, пока status =
+      only_comment.
+      <b>chatAccessHash</b> (post-comment-review) — персистентный accessHash
+      чата обсуждения (отдельно от channelAccessHash — accessHash самого
+      broadcast-канала). Заполняется оппортунистически, когда peerCache
+      TelegramService и так его узнаёт. Нужен, чтобы review-listener на
+      свежем MTProto-соединении мог собрать InputPeer без похода в getDialogs.
+      ----
+      <b>channel_context</b> / <b>channel_context_updated_at</b> (channel-context) —
+      свободное текстовое описание канала (10-50 строк, без фиксированной
+      структуры), собираемое фоновой периодической задачей раз в 90 дней на
+      канал (about + закреп + посты + комментарии → один LLM-вызов). NULL —
+      анализ ещё не проводился. status (banned/suspend) не исключает канал из
+      отбора на анализ.
+      ----
+      <b>active_writers_p50</b> / <b>active_writers_p90</b> / <b>activity_updated_at</b>
+      (channel-activity-percentiles) — 50-й/90-й перцентиль числа уникальных
+      отправителей сообщений в сутки за скользящее окно 7 дней, TTL-метка
+      последнего пересчёта (30 дней — окно данных и частота пересчёта не
+      совпадают специально). Считается тем же скриптом, что и avg_views/
+      subs_count (channel-activity-update.ts), независимым TTL. NULL —
+      ещё не считалось.
     end note
 }
 
@@ -190,15 +262,19 @@ package "tg-join-queue.db  (per-agent)" #FCE8E6 {
     end note
 
     note bottom of join_queue
-      <b>status</b> · начальный: pending
+      <b>status</b> (telegram-error-handling) · начальный: pending
       ----
       • pending — ожидает обработки
       • processing — взят в батч (таймаут возвращает в pending)
-      • joined — успешно вступили
-      • skipped — пропущен (нет discussion-группы и т.п.)
-      • error — ошибка, повтор до MAX_ATTEMPTS
+      • joined — успешно вступили (терминальный)
+      • skipped — временная причина отказа (флуд после исчерпания повторов,
+        CHANNELS_TOO_MUCH) — автоматически возвращается в pending перед
+        каждым следующим батчем
+      • error — постоянная причина отказа (не зависит от повторных попыток) —
+        не ретраится автоматически, снимается только вручную
       ----
       <b>Переходы:</b> pending → processing → joined | skipped | error
+      skipped → pending (автоматически, перед каждым батчем)
       Полная машина переходов — в join-queue.ts.
     end note
 }
@@ -232,12 +308,23 @@ package "tasks.db  (per-agent)" #F3E8FD {
         * createdAt : INTEGER
     }
 
+    entity "error_log" as error_log {
+        * id : INTEGER <<PK>>
+        --
+        * skill_type : TEXT
+        * errorMessage : TEXT
+        * occured_at : INTEGER
+    }
+
     note as N_tasks_db
-      <b>Назначение.</b> Планировщик агента: расписание задач и журнал прогонов.
+      <b>Назначение.</b> Планировщик агента: расписание задач, журнал прогонов,
+      журнал ошибок аккаунта.
       ----
       <b>Таблицы</b>
       • tasks — расписание задач-скиллов (cron + tz, enabled = 0|1)
       • runs — журнал прогонов: исход, длительность, число LLM-вызовов
+      • error_log — append-only лог срабатываний ошибок аккаунта
+        (telegram-error-handling)
     end note
 
     note bottom of runs
@@ -245,6 +332,12 @@ package "tasks.db  (per-agent)" #F3E8FD {
       ----
       • success — прогон завершился успешно
       • error — прогон упал (текст в поле error)
+    end note
+
+    note bottom of error_log
+      <b>Статусов нет.</b> Append-only — пишется при каждом срабатывании
+      ошибок аккаунта (№1-6, 8, 11, 12, 21, 29, «2 канала banned за 2 дня»),
+      независимо от того, создаётся ли при этом запись в agent_restrictions.
     end note
 }
 
@@ -297,8 +390,9 @@ package "discovery.db  (admin-only)" #FFF0F0 {
     entity "discovered_channels" as discovered {
         * canonical_link : TEXT <<PK>>
         --
-        * assigned_agent : TEXT
+        assigned_agent : TEXT
         * added_at : INTEGER
+        banned_at : INTEGER
     }
 
     note as N_discovery_db
@@ -308,6 +402,87 @@ package "discovery.db  (admin-only)" #FFF0F0 {
       • discovered_channels — дедуп по канонической ссылке (PK), назначение каналу агента
       ----
       <b>Статусов нет.</b> Инвариант «один канал — один агент навсегда» держится на PK.
+      ----
+      <b>assigned_agent</b> · NULL = канал в пуле прогона сбора (discovery-similar-parallel v2);
+      фаза distribute заполняет. Исторические строки (до v2) — не NULL.
+      ----
+      <b>banned_at</b> · NULL = активен, иначе unix-сек бана (leave-banned-channels).
+      assigned_agent при бане не меняется и строка не удаляется.
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' agent-restrictions.db (admin-only) — agentRestrictionsDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "agent-restrictions.db  (admin-only)" #FDE9E0 {
+
+    entity "agent_restrictions" as agent_restrictions {
+        * agentId : TEXT <<PK>>
+        --
+        * restriction_type : TEXT
+        * reason : TEXT
+        restriction_duration : INTEGER
+        * restricted_at : INTEGER
+    }
+
+    note as N_agent_restrictions_db
+      <b>Назначение.</b> Ограничения агентов платформы (telegram-error-handling)
+      — одна БД на всю платформу, не per-agent. Наличие строки = агент
+      ограничен, отсутствие = не ограничен. Диспетчер проверяет перед
+      запуском задач любого агента.
+      ----
+      <b>restriction_type</b>
+      • need_update_session — сессия/конфиг невалидны (№1-4, 8). Бессрочно,
+        снимается только вручную.
+      • banned — аккаунт удалён/забанен/заморожен (№5, 6, 11, 12). Бессрочно,
+        снимается только вручную.
+      • suspend — временный анти-спам бан (PEER_FLOOD, №29, 1 день) либо
+        2 забаненных канала за 2 дня (3 дня, дефолт). Снимается автоматически
+        по истечении restriction_duration.
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' pending-reviews.db (per-agent) — pendingReviewsDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "pending-reviews.db  (per-agent)" #E8EAF6 {
+
+    entity "pending_reviews" as pending_reviews {
+        * id : INTEGER <<PK>>
+        --
+        * chatId : TEXT
+        * postId : INTEGER
+        * postText : TEXT
+        * llmScore : REAL
+        llmAxes : TEXT (JSON)
+        * comment : TEXT
+        * rootMsgId : INTEGER
+        * status : TEXT
+        * createdAt : INTEGER
+        resolvedAt : INTEGER
+    }
+
+    note as N_pending_reviews_db
+      <b>Назначение.</b> Очередь ручного подтверждения комментария перед
+      отправкой (post-comment-review) — заполняется, только если для
+      агента включён review-gate (tg-account.json, reviewGateEnabled).
+      ----
+      Только у агентов с включённым review-gate — файл создаётся лениво
+      при первой постановке поста на ревью.
+    end note
+
+    note bottom of pending_reviews
+      <b>status</b> · начальный: pending
+      ----
+      • pending — ожидает решения человека (без TTL — может остаться
+        бессрочно, если никто не нажал кнопку)
+      • approved — отправлено («Да»)
+      • rejected — отклонено («Нет»), пост помечен просмотренным
+      ----
+      <b>Переходы:</b> pending → approved | rejected (безусловно, независимо
+      от исхода — решение 10 design.md post-comment-review). Отдельного
+      append-only лога решений нет — статус и resolvedAt пишутся в ту же
+      строку, llmScore/llmAxes уже рядом для сопоставления с llm_log.
     end note
 }
 
@@ -330,6 +505,7 @@ replies        }o..|| channels : chatId
 group_threads  }o..|| channels : chatId
 dm_threads     }o..o{ dm_candidates : userId
 runs           }o..|| tasks : (agentId, type)
+pending_reviews }o..|| channels : chatId
 
 legend right
   | Обозначение | Значение |

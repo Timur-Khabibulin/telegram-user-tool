@@ -1,0 +1,17 @@
+# Запуск ежедневно в 03:00 UTC (заменяет tg-channel-coverage-update.timer).
+# Сам скрипт трогает только каналы с просроченным TTL (30 дней на каждую из
+# двух групп метрик независимо: coverage_updated_at / activity_updated_at) —
+# ежедневный тик лишь быстрее подхватывает новые/просроченные каналы, не
+# заставляет ждать календарного начала месяца.
+# Persistent=true — если VPS был выключен в момент срабатывания, прогон
+# наверстается при следующем старте.
+
+[Unit]
+Description=Telegram channel activity and coverage metrics update timer (daily, 03:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,21 +1,28 @@
 ---
 name: tg-agent-create
-description: "Full setup skill: creates a new Telegram agent from scratch. Registers the TG account in OpenClaw, creates the agent, obtains a session string via auth tools, writes tg-account.json, and prompts for SOUL.md. Use when the user wants to add a new Telegram agent to the OpenClaw platform."
+description: "DEPRECATED — use tg-agent-autoregistration instead. Full setup skill: creates a new Telegram agent from scratch. Registers the TG account in OpenClaw, automatically provisions a working mobile proxy (asocks), obtains a session string via auth tools, creates the file structure via one script, and copies the reference persona."
 ---
 
 # Telegram agent create
+
+> **DEPRECATED.** Заменён на `tg-agent-autoregistration` (массовая
+> автоматическая регистрация из tdata-сессий). Этот скилл оставлен для
+> справки, новых агентов через него создавать не нужно.
 
 ## Чек-лист подготовки
 
 Перед запуском убедись, что пользователь выполнил всё вручную:
 
-- [ ] Создан socks5 прокси
-- [ ] Настроен эмулятор с прокси, TG-аккаунт зарегистрирован
+- [ ] Настроен эмулятор, TG-аккаунт зарегистрирован (номер телефона активен в Telegram)
 - [ ] Получены API-ключи на https://my.telegram.org/auth
+
+Мобильный прокси для входа в аккаунт создавать вручную **не нужно** — система подбирает его
+сама (Шаг 3). Прокси эмулятора, использованный при регистрации номера, не обязан совпадать с
+прокси, который будет подобран для дальнейшей работы агента.
 
 ---
 
-## Шаг 1 — Запросить все данные
+## Шаг 1 — Запросить данные
 
 Сообщи пользователю, что нужны следующие данные, и жди одного ответа:
 
@@ -27,15 +34,41 @@ description: "Full setup skill: creates a new Telegram agent from scratch. Regis
 - apiId             — API ID с my.telegram.org
 - apiHash           — API Hash с my.telegram.org
 - deviceModel       — модель устройства (например: Samsung Galaxy S23)
-- proxy.host        — хост прокси
-- proxy.port        — порт прокси
-- proxy.username    — логин прокси
-- proxy.password    — пароль прокси
-- sessionString     — (опционально) готовая сессия. Если есть — aвторизация пропускается. Если нет — нужен также:
 - phoneNumber       — номер телефона аккаунта агента (формат +79001234567)
+- maxAttempts       — (опционально) сколько кандидатов прокси перебирать, по умолчанию 5
+- sessionString     — (опционально) готовая сессия. Если есть — авторизация (Шаг 5) пропускается
 ```
 
 Запомни все полученные значения — они используются на следующих шагах.
+
+---
+
+## Шаг 1.1 — Выбрать страну прокси
+
+**СТОП.** Спроси у пользователя:
+
+```
+Хочешь сразу указать код страны прокси текстом, или выбрать из списка доступных стран?
+```
+
+Источник кандидатов (`/proxy/search`) фильтруется только по стране — региона/города здесь
+больше нет (mobile-proxy-unique-exit-ip).
+
+### Вариант A — готовое значение
+
+Юзер называет `countryCode` текстом. Запомнить и перейти к Шагу 2.
+
+### Вариант B — выбор из списка
+
+```bash
+cd ~/.openclaw/extensions/telegram-user-tool && ./node_modules/.bin/tsx \
+  src/scripts/provision-proxy-for-new-agent.ts --list-countries
+```
+
+Показать список (`код <TAB> название`), спросить пользователя, какую страну выбрать. Запомнить
+`countryCode`.
+
+Перейти к Шагу 2.
 
 ---
 
@@ -53,73 +86,77 @@ openclaw config get channels.telegram.accounts.agentsBot.allowFrom
 openclaw config set channels.telegram.accounts.agentsBot.allowFrom '[<все элементы из предыдущего шага>, "<telegram_user_id>"]'
 ```
 
+---
+
+## Шаг 3 — Подобрать рабочий прокси до входа в аккаунт
+
+**СТОП.** Напиши пользователю короткое сообщение и продолжай дальше:
+
+```
+Подбираю рабочий мобильный прокси (до <maxAttempts> попыток) перед входом в аккаунт...
+```
+
+Вызвать:
+
+```bash
+cd ~/.openclaw/extensions/telegram-user-tool && ./node_modules/.bin/tsx \
+  src/scripts/provision-proxy-for-new-agent.ts \
+  --api-id <apiId> \
+  --api-hash <apiHash> \
+  --agent-id <agentName> \
+  --country <countryCode> \
+  --max-attempts <maxAttempts>
+```
+
+Скрипт печатает одну JSON-строку в stdout:
+- `{"ok":true,"proxy":{...},"attempts":N}` — прокси подтверждён, `proxy` содержит
+  `host/port/username/password/countryCode`. Запомнить эти значения для Шага 6.
+- `{"ok":false,"attempts":N}` — рабочий прокси не найден за N попыток.
+- `{"ok":false,"attempts":N,"poolExhausted":true}` — свободных мобильных прокси для страны не
+  осталось (до исчерпания `maxAttempts`).
+
+Проверка кандидатов НЕ отправляет реальный код авторизации в Telegram — только устанавливает и
+разрывает MTProto-соединение. Настоящий код (Шаг 5) запрашивается один раз, уже с подтверждённым
+прокси.
+
+Если `ok: false`:
+
+**СТОП.** Напиши пользователю:
+
+```
+Не удалось подобрать рабочий прокси за <maxAttempts> попыток в стране <countryCode>.
+Попробовать другую страну (вернуться к Шагу 1.1) или увеличить число попыток?
+```
+
+Ждать ответа. Если пользователь соглашается — повторить Шаг 3 (с новым регионом или
+`maxAttempts`). Если отказывается — завершить выполнение.
 
 ---
 
-## Шаг 3 — Создать агента и файловую структуру
+## Шаг 4 — Создать агента и файловую структуру
 
-Создать агента
-```bash
-openclaw agents add <agentName> \
-  --workspace ~/.openclaw/workspace-<agentName> \
-  --agent-dir ~/.openclaw/agents/<agentName>/agent \
-  --model openai-codex/gpt-5.4 \
-  --json
+**СТОП.** Напиши пользователю короткое сообщение и продолжай дальше:
+
+```
+Прокси подтверждён. Создаю агента и файловую структуру.
 ```
 
-Посмотреть текущие биндинги и определить следующий индекс:
+Вызвать одним шагом:
 
 ```bash
-openclaw config get bindings --json | python3 -c "import sys,json; print(len(json.load(sys.stdin)))"
+bash ~/.openclaw/workspace/skills/tg-agent-create/scripts/create-agent-scaffold.sh '<agentName>' '<telegram_user_id>'
 ```
 
-Добавить биндинг по следующему индексу (например, если сейчас 2 элемента — индекс `2`):
+Скрипт регистрирует агента, добавляет биндинг, создаёт директорию агента, копирует
+`auth-profiles.json`/`models.json` из `main`, создаёт `AGENTS.md` и пустые workspace-файлы.
+`SOUL.md` в workspace не создаётся вообще — персона резолвится через поле `persona` в
+`tg-account.json` (Шаг 6) на общий шаблон `~/.openclaw/personas/<persona>/SOUL.md`. Если
+агент с таким именем уже зарегистрирован — скрипт завершится ошибкой, не трогая
+существующего агента; сообщить об этом пользователю и остановиться.
 
-```bash
-openclaw config set bindings[<следующий_индекс>] '{"agentId":"<agentName>","match":{"channel":"telegram","accountId":"agentsBot","peer":{"kind":"direct","id":"<telegram_user_id>"}}}'
-```
+Перейти к шагу 4.1
 
-Создать директорию агента:
-
-```bash
-mkdir -p ~/.openclaw/agents/<agentName>/agent
-```
-
-Скопировать конфиги из main-агента:
-
-```bash
-cp ~/.openclaw/agents/main/agent/auth-profiles.json ~/.openclaw/agents/<agentName>/agent/
-cp ~/.openclaw/agents/main/agent/models.json ~/.openclaw/agents/<agentName>/agent/
-```
-
-Создать `AGENTS.md` со следующим содержимым:
-
-```bash
-cat > ~/.openclaw/workspace-<agentName>/AGENTS.md << 'EOF'
-## Session Startup
-Сначала прочитай:
-1. SOUL.md — это кто я, мой стиль общения и строгие правила
-2. MEMORY.md + memory/сегодня.md
-
-Всегда строго следуй абослютно всем правилам из SOUL.md.
-EOF
-```
-
-Создать пустые workspace-файлы:
-
-```bash
-touch ~/.openclaw/workspace-<agentName>/HEARTBEAT.md
-touch ~/.openclaw/workspace-<agentName>/SOUL.md
-touch ~/.openclaw/workspace-<agentName>/USER.md
-touch ~/.openclaw/workspace-<agentName>/BOOTSTRAP.md
-touch ~/.openclaw/workspace-<agentName>/IDENTITY.md
-touch ~/.openclaw/workspace-<agentName>/TOOLS.md
-touch ~/.openclaw/workspace-<agentName>/MEMORY.md
-```
-
-Перейти к шагу 3.1
-
-### 3.1 Промежуточный статус
+### 4.1 Промежуточный статус
 
 **СТОП.** Напиши пользователю короткое сообщение и продолжай дальше:
 
@@ -133,20 +170,22 @@ touch ~/.openclaw/workspace-<agentName>/MEMORY.md
 Аккаунт зарегистрирован, агент и файловая структура созданы. Перехожу к записи tg-account.json.
 ```
 
-Перейти к шагу 3.2
----
-
-## 3.2 Развилка после Шага 3.1
-
-Если в данных из Шага 1 присутствует `sessionString` — **пропустить Шаг 4** и перейти сразу к Шагу 5, используя эту строку как sessionString.
-
-Если `sessionString` не был передан — выполнить Шаг 4.
+Перейти к шагу 4.2
 
 ---
 
-## Шаг 4 — Получить sessionString
+## 4.2 Развилка после Шага 4.1
 
-### 4.1 Отправить код
+Если в данных из Шага 1 присутствует `sessionString` — **пропустить Шаг 5** и перейти сразу к
+Шагу 6, используя эту строку как `sessionString`.
+
+Если `sessionString` не был передан — выполнить Шаг 5.
+
+---
+
+## Шаг 5 — Получить sessionString
+
+### 5.1 Отправить код
 
 **СТОП.** Напиши пользователю короткое сообщение и продолжай дальше:
 
@@ -154,7 +193,7 @@ touch ~/.openclaw/workspace-<agentName>/MEMORY.md
 Отправляю код на номер <phoneNumber>. Инструмент сделает до 3 попыток по 30 секунд каждая.
 ```
 
-Вызвать:
+Вызвать, используя подтверждённый на Шаге 3 прокси:
 
 ```
 tg_auth_send_code(
@@ -163,10 +202,10 @@ tg_auth_send_code(
   phoneNumber: <phoneNumber>,
   proxy: {
     type:     "socks5",
-    host:     <proxy.host>,
-    port:     <proxy.port>,
-    username: <proxy.username>,
-    password: <proxy.password>
+    host:     <proxy.host из Шага 3>,
+    port:     <proxy.port из Шага 3>,
+    username: <proxy.username из Шага 3>,
+    password: <proxy.password из Шага 3>
   }
 )
 ```
@@ -181,13 +220,15 @@ tg_auth_send_code(
 Повторить попытку?
 ```
 
-Ждать ответа. Если пользователь соглашается — повторить вызов шаг 4.1. Если отказывается — завершить выполнение.
+Ждать ответа. Если пользователь соглашается — повторить вызов шаг 5.1. Если отказывается —
+завершить выполнение.
 
-Если успех — сохранить `phoneCodeHash` из ответа и перейти к шагу 4.2.
+Если успех — сохранить `phoneCodeHash` из ответа и перейти к шагу 5.2.
 
-### 4.2 Запросить код у пользователя
+### 5.2 Запросить код у пользователя
 
-**СТОП.** Напиши пользователю следующее сообщение и жди ответа. Не переходи к шагу 4.3 до получения кода:
+**СТОП.** Напиши пользователю следующее сообщение и жди ответа. Не переходи к шагу 5.3 до
+получения кода:
 
 ```
 Код отправлен в Telegram на номер <phoneNumber>.
@@ -195,7 +236,7 @@ tg_auth_send_code(
 Если на аккаунте включён 2FA — пришли также пароль.
 ```
 
-### 4.3 Войти в аккаунт
+### 5.3 Войти в аккаунт
 
 Перед вызовом напиши пользователю:
 
@@ -208,7 +249,7 @@ tg_auth_send_code(
 ```
 tg_auth_sign_in(
   phoneNumber:   <phoneNumber>,
-  phoneCodeHash: <phoneCodeHash из шага 4.1>,
+  phoneCodeHash: <phoneCodeHash из шага 5.1>,
   phoneCode:     <код от пользователя>,
   password:      <2FA пароль, если был прислан>
 )
@@ -221,28 +262,34 @@ tg_auth_sign_in(
 ```
 Не удалось войти в аккаунт. Ошибка: <error из ответа>
 
-Повторить попытку? Если код уже истёк — нужно будет запросить новый (вернуться к шагу 4.1).
+Повторить попытку? Если код уже истёк — нужно будет запросить новый (вернуться к шагу 5.1).
 ```
 
 Ждать ответа пользователя:
 - Если соглашается повторить с тем же кодом — повторить вызов `tg_auth_sign_in`
-- Если код истёк или пользователь хочет новый — вернуться к шагу 4.1
+- Если код истёк или пользователь хочет новый — вернуться к шагу 5.1
 - Если отказывается — завершить выполнение
 
-Если успех — сохранить `sessionString` из ответа и перейти к шагу 5.
+Если успех — сохранить `sessionString` из ответа и перейти к шагу 6.
 
 ---
 
-## Шаг 5 — Создать tg-account.json
+## Шаг 6 — Создать tg-account.json
 
-Записать файл `~/.openclaw/workspace-<agentName>/tg-account.json` со всеми заполненными значениями:
+По умолчанию агент использует персону `maria` (единственная персона на платформе на
+момент написания — каталог `~/.openclaw/personas/maria/`). Если пользователь явно не
+попросил другую персону, использовать `maria` как `<personName>`, не спрашивая отдельно.
+
+Записать файл `~/.openclaw/workspace-<agentName>/tg-account.json` со всеми заполненными
+значениями (прокси — из подтверждённого кандидата Шага 3):
 
 ```json
 {
   "accountId": "<telegram_user_id>",
   "apiId": <apiId>,
   "apiHash": "<apiHash>",
-  "sessionString": "<sessionString из шага 1 (если был передан) или из шага 4.3>",
+  "sessionString": "<sessionString из шага 1 (если был передан) или из шага 5.3>",
+  "persona": "<personName>",
 
   "device": {
     "deviceModel": "<deviceModel>",
@@ -254,43 +301,58 @@ tg_auth_sign_in(
 
   "proxy": {
     "type": "socks5",
-    "host": "<proxy.host>",
-    "port": <proxy.port>,
-    "username": "<proxy.username>",
-    "password": "<proxy.password>"
+    "host": "<proxy.host из Шага 3>",
+    "port": <proxy.port из Шага 3>,
+    "username": "<proxy.username из Шага 3>",
+    "password": "<proxy.password из Шага 3>",
+    "countryCode": "<proxy.countryCode из Шага 3>"
   }
 }
 ```
-Перейти к шагу 6
----
-
-## Шаг 6 — Запросить системный промпт
-
-**СТОП.** Напиши пользователю следующее сообщение и жди ответа. Не переходи к шагу 7 до получения текста:
-
-```
-Агент создан. Осталось настроить личность.
-Пришли содержимое SOUL.md для агента <agentName> — это его системный промпт.
-```
-
-Записать полученный текст в файл `~/.openclaw/workspace-<agentName>/SOUL.md`.
 
 Перейти к шагу 7
+
 ---
 
-## Шаг 7 — Проверка установки
+## Шаг 7 — Персона
 
-Все проверки выполняются одним скриптом. Агент подставляет реальные значения **только в двух местах** — после `bash` идут `<agentName>` и `<telegram_user_id>` из Шага 1
+Персона задаётся ссылкой (`persona` в `tg-account.json`, Шаг 6) на общий шаблон
+`~/.openclaw/personas/<personName>/SOUL.md` — файл читается диспетчером заново на
+каждый прогон, копировать его в workspace агента не нужно.
+
+Если `<personName>` из Шага 6 уже существует в `~/.openclaw/personas/` — на этом всё,
+переходить к Шагу 8.
+
+Если пользователь попросил новую персону, которой ещё нет в `~/.openclaw/personas/` —
+запросить у пользователя текст `SOUL.md` для новой персоны и создать для неё каталог
+шаблона:
+
+```bash
+mkdir -p ~/.openclaw/personas/<personName>
+# записать SOUL.md с текстом от пользователя в ~/.openclaw/personas/<personName>/SOUL.md
+```
+
+`<personName>` в `tg-account.json` (Шаг 6) должен совпадать с именем этого каталога.
+
+Перейти к шагу 8
+
+---
+
+## Шаг 8 — Проверка установки
+
+Все проверки выполняются одним скриптом. Агент подставляет реальные значения **только в двух
+местах** — после `bash` идут `<agentName>` и `<telegram_user_id>` из Шага 1
 
 ```bash
 bash ~/.openclaw/workspace/skills/tg-agent-create/scripts/verify-agent.sh '<agentName>' '<telegram_user_id>'
 ```
 
-**СТОП.** Обязательно скопируй вывод скрипта в сообщение пользователю как есть. Не прерывай скилл даже при FAIL — переходи к Шагу 8.
+**СТОП.** Обязательно скопируй вывод скрипта в сообщение пользователю как есть. Не прерывай
+скилл даже при FAIL — переходи к Шагу 9.
 
 ---
 
-## 8. Итог
+## 9. Итог
 
 **СТОП.** Обязательно напиши пользователю финальное сообщение:
 
@@ -298,7 +360,7 @@ bash ~/.openclaw/workspace/skills/tg-agent-create/scripts/verify-agent.sh '<agen
 Агент <agentName> готов.
 - TG-аккаунт: <telegram_user_id>
 - Workspace: ~/.openclaw/workspace-<agentName>
+- Прокси: <proxy.host>:<proxy.port> (<countryCode>)
 
 Перед работой с агентом не забудь перезапустить gateway командой `openclaw gateway restart`
 ```
-

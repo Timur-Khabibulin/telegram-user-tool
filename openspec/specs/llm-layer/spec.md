@@ -4,22 +4,19 @@
 TBD - created by archiving change task-scheduler. Update Purpose after archive.
 ## Requirements
 ### Requirement: codex через OAuth как primary
-Вызовы LLM SHALL идти на подписке ChatGPT Plus через codex по OAuth, без потокенной оплаты за primary. Primary-провайдер — `openai-oauth-provider`, модель `gpt-5.4` (зависит от плана Codex).
+Вызовы LLM SHALL идти на подписке ChatGPT Plus через codex по OAuth, без потокенной оплаты за primary. Primary-провайдер — `openai-oauth-provider`, модель `gpt-5.4-mini` (зависит от плана Codex).
 
 #### Scenario: Primary-вызов на подписке
 - **WHEN** скилл вызывает `complete()` или `completeObject()`
 - **THEN** запрос уходит на codex по OAuth-токену из `auth.json` ($0 для primary)
 
-### Requirement: Failover при лимите
-Если codex упирается в лимит/ошибку, запрос SHALL автоматически уходить на другую модель. `ai-fallback` оборачивает список моделей в одну; при ошибке primary зовёт следующую (`@ai-sdk/openai` по `OPENAI_API_KEY`). Через `shouldRetryThisError` можно сузить переключение до «только лимит».
+### Requirement: Единственный provider без failover
 
-#### Scenario: Rate-limit переключает на fallback
+`LlmClient` SHALL оборачивать ровно одну модель (`codexProvider` на `gpt-5.4-mini`) через `createFallback` — вторая модель (`@ai-sdk/openai` по `OPENAI_API_KEY`) закомментирована в коде и не подключена. При ошибке/лимите primary запрос завершается ошибкой, автоматического переключения на другого провайдера сейчас нет.
+
+#### Scenario: Rate-limit не переключает на другую модель
 - **WHEN** primary (codex) возвращает 429 или ошибку
-- **THEN** `ai-fallback` зовёт следующую модель из списка
-
-#### Scenario: Сбой авторизации
-- **WHEN** refresh token истёк и вызов codex падает
-- **THEN** `ai-fallback` уходит на запасную модель; система не встаёт, codex возвращается после повторного `codex login`
+- **THEN** запрос завершается ошибкой; повторный успешный вызов возможен только после восстановления codex (нет второго провайдера в списке `createFallback`)
 
 ### Requirement: Автоматический рефреш токена с write-back
 Рефреш токена SHALL выполняться автоматически без ручного вмешательства, включая сохранение обновлённого токена между запусками процессов. При `ensureFresh: true` (дефолт) перед запросом проверяется access token; если протух — `refreshChatGptTokens()` обновляет его, и свежие токены пишутся обратно в `auth.json` (`writeAuthFile` с `last_refresh`). Условие — файл записываемый пользователем `tg`.
@@ -35,21 +32,44 @@ TBD - created by archiving change task-scheduler. Update Purpose after archive.
 - **WHEN** несколько агентов вызывают LLM
 - **THEN** все используют общий `~/.openclaw/codex-auth/auth.json` (общий пул лимита Plus)
 
-### Requirement: Персона из SOUL.md без системных промптов OpenClaw
-Персона SHALL браться из `SOUL.md` агента (`~/.openclaw/agents/<agentName>/agent/SOUL.md`) и передаваться как `system`-сообщение — без системных промптов OpenClaw.
-
-#### Scenario: SOUL.md как system-сообщение
-- **WHEN** оркестрация вызывает `complete({ system: soul, prompt })`
-- **THEN** `soul` прочитан из `SOUL.md` агента и передан как `system`, системные промпты OpenClaw не применяются
-
 ### Requirement: Structured output для скоринга и выбора сообщений
-Валидируемый JSON SHALL поддерживаться для скоринга и выбора сообщений. JSON-вызовы идут через `completeObject()` со схемой `zod`; текстовые — через `complete()`. Каталог промптов: `generateDM`, `generateThreadReply`, `generateReply`, `extractTopics` (текст), `selectRelevantMessage` (JSON `{ id }`), `scoreForDM` (JSON `{ score, reason }`), `generateDmReply` (текст).
+
+Валидируемый JSON SHALL поддерживаться для скоринга и выбора сообщений. JSON-вызовы идут
+через `completeObject()` со схемой `zod`; текстовые — через `complete()`. Каталог промптов:
+`generateDM`, `generateThreadReply`, `generateReply`, `extractTopics`, `analyzeAndReply`
+(текст, `dm-replies`); `analyzeChannelMessages` (JSON, выбор общего сообщения для ответа +
+DM-скоринг одним вызовом, `monitor`/`monitor-v2`/`monitor-v5`), `selectRelevantMessageInBatch`
+(JSON `{ chatId, id }`, `account-warmup`), `scoreTopicRelevance` (JSON `{ theses, channelTopic,
+score, reason }`, `discovery/similar`).
 
 #### Scenario: JSON-вывод валидируется схемой
-- **WHEN** вызывается `selectRelevantMessage` или `scoreForDM`
+
+- **WHEN** вызывается `analyzeChannelMessages`, `selectRelevantMessageInBatch` или `scoreTopicRelevance`
 - **THEN** результат возвращается как валидируемый JSON по схеме `zod` через `completeObject()`
 
+#### Scenario: Оценка тематической релевантности по описанию и постам канала
+
+- **WHEN** вызывается `scoreTopicRelevance` с темой прогона, описанием канала и текстами
+  последних постов
+- **THEN** возвращается `{ theses, channelTopic, score, reason }`, где `theses` — тезис по
+  каждому посту, `channelTopic` — основная тема канала (короткая фраза), `score` — число в
+  диапазоне `0..1` (доля контента канала по теме прогона), валидируемое схемой `zod`
+
 #### Scenario: Невалидный JSON
+
 - **WHEN** structured-вывод невалиден
 - **THEN** повтор/ошибка на уровне `generateObject`
+
+### Requirement: Персона из общего шаблона без системных промптов OpenClaw
+Персона SHALL браться из общего шаблона `~/.openclaw/personas/<personName>/
+SOUL.md`, где `<personName>` — значение поля `persona` из `tg-account.json`
+агента, и передаваться как `system`-сообщение — без системных промптов
+OpenClaw. Файл читается заново на каждый вызов диспетчера (не копируется в
+рабочую папку агента и не кэшируется между процессами).
+
+#### Scenario: SOUL.md шаблона персоны как system-сообщение
+- **WHEN** оркестрация вызывает `complete({ system: soul, prompt })`
+- **THEN** `soul` прочитан из `~/.openclaw/personas/<personName>/SOUL.md`
+  (`<personName>` — персона агента из `tg-account.json`) и передан как
+  `system`, системные промпты OpenClaw не применяются
 

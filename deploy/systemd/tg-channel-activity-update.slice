@@ -1,0 +1,11 @@
+[Unit]
+Description=Telegram channel activity/coverage update resource slice
+
+[Slice]
+MemoryMax=1G
+# Отдельный slice от tg-agents.slice (channel-activity-percentiles, инцидент
+# 2026-08-23/25): плановый и ручной прогоны channel-activity-update.ts делили
+# общий бюджет 2GB с диспетчерами агентов (tg-agent@*.service) — cgroup-OOM
+# убивал процесс не из-за его собственного потребления, а из-за совокупной
+# нагрузки слайса. Свой бюджет 1G изолирует эту нагрузку от обычного трафика
+# агентов и наоборот.

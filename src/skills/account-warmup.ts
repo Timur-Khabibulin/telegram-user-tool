@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import type { SkillContext, SkillStatus } from "./types";
 import { sleep, randomDelayMs, FloodAbortError, withFloodRetry } from "./util";
+import { ClientNotConnectedError } from "../core/telegram/errors";
 import { extractTopics, selectRelevantMessageInBatch, generateWarmupReply } from "../llm/prompts";
 
 const MAX_CHATS = 15;
@@ -53,6 +54,7 @@ export async function runAccountWarmup(ctx: SkillContext): Promise<SkillStatus> 
             if (err instanceof FloodAbortError) {
                 return { status: "error", details: { "шаг": "получение сообщений", "итог": "повторный flood_wait", "чат": chat.chatId } };
             }
+            if (err instanceof ClientNotConnectedError) throw err;
             log.warn(`[account-warmup] get_messages failed for chatId=${chat.chatId}, skipping: ${err.message ?? err}`);
             continue; // другая ошибка — пропустить чат
         }
@@ -71,6 +73,7 @@ export async function runAccountWarmup(ctx: SkillContext): Promise<SkillStatus> 
             if (err instanceof FloodAbortError) {
                 return { status: "error", details: { "шаг": "отметка прочитанным", "итог": "повторный flood_wait", "чат": chat.chatId } };
             }
+            if (err instanceof ClientNotConnectedError) throw err;
             log.warn(`[account-warmup] mark_as_read failed for chatId=${chat.chatId}, skipping: ${err.message ?? err}`);
             continue;
         }
@@ -126,6 +129,9 @@ export async function runAccountWarmup(ctx: SkillContext): Promise<SkillStatus> 
         if (err instanceof FloodAbortError) {
             return { status: "error", details: { "шаг": "ответ", "итог": "повторный flood_wait" } };
         }
+        // instanceof-проверка обязана быть throw, не return — иначе исключение не
+        // долетит до catch-блока dispatcher.ts, который создаёт agent_restrictions.
+        if (err instanceof ClientNotConnectedError) throw err;
         log.warn(`[account-warmup] reply failed: ${err.message ?? err}`);
         return { status: "error", details: { "шаг": "ответ", "ошибка": err.message ?? String(err) } };
     }

@@ -6,8 +6,16 @@ After=network.target
 Type=oneshot
 User=root
 WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
-ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/dispatcher.ts --agent %i
+# Потолок параллелизма C=16 (predictable-agent-scheduling): перебор файлов-слотов
+# /run/tg-agents/slot-0.lock .. slot-15.lock (создаются systemd-tmpfiles.d,
+# deploy/systemd/tg-agents-slots.conf). Первый успешно захваченный flock'ом слот —
+# запуск диспетчера; ядро освобождает advisory-лок автоматически при любом
+# завершении процесса (включая SIGKILL от OOM-killer), поэтому убитый прогон не
+# держит слот занятым. Все C слотов заняты — тихий выход (exit 0, не ошибка
+# юнита): задача осталась due, подхватится на одном из следующих тиков.
+ExecStart=/usr/bin/bash -c 'for slot in $(/usr/bin/seq 0 15); do /usr/bin/flock -n /run/tg-agents/slot-$slot.lock -c "/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/dispatcher.ts --agent %i" && exit 0; done; echo "[tg-agent@%i] all concurrency slots busy, skipping this tick" >&2; exit 0'
 EnvironmentFile=-/root/.openclaw/codex-auth/.env
+EnvironmentFile=-/root/.openclaw/secrets.env
 Slice=tg-agents.slice
 TimeoutStartSec=3600
 StandardOutput=journal

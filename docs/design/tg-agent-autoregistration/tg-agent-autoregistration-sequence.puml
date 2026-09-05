@@ -1,0 +1,76 @@
+@startuml tg-agent-autoregistration-sequence
+autonumber
+
+actor "Оператор" as Actor
+participant OpenClaw
+participant "Скрипт общий" as Main
+participant "Скрипт tdata" as TData
+
+Actor -> OpenClaw : запусти tg-agent-autoregistration (megaLinks, startAgentNumber, proxyRegion, maxProxyAttempts, personName)
+activate OpenClaw
+
+OpenClaw -> Main : invoke(params)
+activate Main
+
+Main -> Main : прочитать шаблоны персоны personName (R-D1)
+alt шаблон персоны не найден или неполон
+    Main --> OpenClaw : ошибка — шаблон персоны personName недоступен, прогон не начат (R-10)
+else шаблон в порядке
+    Main -> Main : вычислить диапазон агентских ID, N = число ссылок в megaLinks (R-11), проверить на пересечение с существующими агентами и стейджингом (R-8)
+    alt пересечение найдено
+        Main --> OpenClaw : ошибка — диапазон ID занят, прогон не начат
+    else диапазон свободен
+        Main -> Main : скачать tdata-архивы из Mega в стейджинг, один архив на аккаунт (R-7, R-D2, R-D3, R-11)
+
+        loop для каждого аккаунта (последовательно)
+            Main -> Main : прочитать phoneNumber/currentPassword из tdata, сгенерировать username (R-2, R-3, R-4)
+
+            loop подбор прокси, до maxProxyAttempts
+                Main -> Main : запросить нового кандидата мобильного прокси (asocks) для proxyRegion (R-12)
+                Main -> TData : connect(tdataPath, proxyCandidate, apiId, apiHash)
+                activate TData
+                alt не подключился (прокси/сеть)
+                    TData --> Main : error(connect)
+                    deactivate TData
+                    Main -> Main : взять следующего кандидата
+                else подключился
+                    TData -> TData : подготовить аккаунт — сменить 2FA, сбросить сессии, удалить существующие фото/публичные каналы, применить профиль, создать канал с постом (R-2, R-5, R-6, R-13)
+                    alt подготовка успешна
+                        TData --> Main : telegram_user_id
+                        deactivate TData
+                    else ошибка Telegram API при подготовке (USERNAME_OCCUPIED / PASSWORD_HASH_INVALID / FLOOD_WAIT и т.п.)
+                        TData --> Main : error(setup, code)
+                        deactivate TData
+                        Main -> Main : записать status=setup_failed(error) в стейджинге, выйти из подбора прокси (R-1, R-9)
+                    end
+                end
+            end
+
+            alt прокси не найден за maxProxyAttempts
+                Main -> Main : записать status=proxy_failed в стейджинге, перейти к следующему аккаунту (R-9)
+            else подготовка аккаунта завершилась ошибкой (status=setup_failed уже записан)
+                Main -> Main : перейти к следующему аккаунту
+            else прокси подобран и подготовка аккаунта завершена
+                Main -> Main : authSendCode(apiId, apiHash, phoneNumber, proxy) — агентская сессия
+                Main -> TData : readIncomingCode() — таймаут 2 минуты (R-D5)
+                activate TData
+                alt код получен
+                    TData --> Main : phoneCode
+                    deactivate TData
+                    Main -> Main : authSignIn(phoneCode, newPassword) → agentSessionString
+                    Main -> Main : перенести аккаунт в workspace-agent<N>, удалить стейджинг (R-D4)
+                else код не пришёл (timeout / SMS вместо app-сообщения)
+                    TData --> Main : timeout
+                    deactivate TData
+                    Main -> Main : записать status=needs_manual_code в стейджинге, перейти к следующему (R-9)
+                end
+            end
+        end
+
+        Main --> OpenClaw : итоговый отчёт по каждому аккаунту
+    end
+end
+deactivate Main
+OpenClaw --> Actor : отчёт о прогоне
+deactivate OpenClaw
+@enduml

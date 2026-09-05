@@ -1,4 +1,12 @@
-## ADDED Requirements
+# dm-candidates Specification
+
+## Purpose
+
+Хранение и обработка очереди кандидатов на личные сообщения (DM) — вставка
+без дублей, выборка по `score`, обновление статуса, устаревание старых
+записей.
+
+## Requirements
 
 ### Requirement: dm_candidates table exists
 Таблица `dm_candidates` SHALL быть создана в БД агента (`tg-channels.db`) при первом write-вызове через `CREATE TABLE IF NOT EXISTS`.

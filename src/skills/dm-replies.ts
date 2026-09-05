@@ -11,6 +11,7 @@
 import { z } from "zod";
 
 import type { SkillContext, SkillStatus } from "./types";
+import { ClientNotConnectedError } from "../core/telegram/errors";
 import { getDmThreadsByUsers, updateDmThreadMsgs, type DmThreadMessage } from "../core/db/dm-threads";
 import { analyzeAndReply } from "../llm/prompts";
 
@@ -101,6 +102,7 @@ export async function runDmReplies(ctx: SkillContext): Promise<SkillStatus> {
         try {
             sendResult = await tg.sendDm({ userId: thread.userId, accessHash: thread.userAccessHash, text: replyText });
         } catch (err: any) {
+            if (err instanceof ClientNotConnectedError) throw err;
             log.warn(`[dm-replies] send_dm error for userId=${thread.userId}: ${err.message ?? err}`);
             await tg.markAsRead(thread.userId, maxNewId);
             continue;

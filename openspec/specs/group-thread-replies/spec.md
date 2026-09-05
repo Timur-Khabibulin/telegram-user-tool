@@ -1,4 +1,12 @@
-## ADDED Requirements
+# group-thread-replies Specification
+
+## Purpose
+
+Отслеживание ответов пользователей на сообщения агента в группах — обнаружение
+реплаев, ленивое создание тредов, генерация ответов с полным контекстом
+треда, устаревание неактивных тредов.
+
+## Requirements
 
 ### Requirement: Agent detects replies to its own group messages
 Когда агент читает непрочитанные сообщения группы, он SHALL проверять для каждого сообщения наличие поля `replyToMsgId`. Если поле присутствует, агент SHALL искать этот ID в таблице `group_thread_agent_msgs` (по chatId + agentMsgId). Если найдено — сообщение классифицируется как thread-reply и обрабатывается отдельно от общих сообщений.
@@ -15,8 +23,6 @@
 - **WHEN** `replyToMsgId` найден в таблице `replies` (агент ранее отвечал), но запись в `group_thread_agent_msgs` отсутствует
 - **THEN** это первый ответ пользователя — создаётся новый тред (см. требование "Thread is created lazily")
 
----
-
 ### Requirement: Thread is created lazily on first user reply
 Тред SHALL создаваться только при первом ответе пользователя на сообщение агента. До этого момента детекция осуществляется через таблицу `replies`.
 
@@ -27,8 +33,6 @@
 #### Scenario: Thread not created if no matching reply record
 - **WHEN** `replyToMsgId` не найден ни в `replies`, ни в `group_thread_agent_msgs`
 - **THEN** тред не создаётся; сообщение обрабатывается как general message
-
----
 
 ### Requirement: Agent responds to thread replies with full chain context
 Для каждого активного треда с новыми сообщениями агент SHALL генерировать один ответ, используя полную цепочку сообщений из `group_threads.messages` в качестве контекста.
@@ -45,8 +49,6 @@
 - **WHEN** тред имеет `status = 'expired'` (lastActivityAt < now - 4 дней)
 - **THEN** агент не отвечает на новые сообщения в этом треде; сообщения пропускаются
 
----
-
 ### Requirement: Agent message IDs are registered after each reply in thread
 После каждой успешной отправки ответа в треде агент SHALL регистрировать ID отправленного сообщения в `group_thread_agent_msgs` и обновлять `group_threads` (добавлять в messages JSON, обновлять lastActivityAt).
 
@@ -58,8 +60,6 @@
 - **WHEN** отправка ответа завершилась ошибкой (FLOOD_WAIT или другая)
 - **THEN** `group_thread_agent_msgs` и `group_threads` не обновляются; тред остаётся в прежнем состоянии
 
----
-
 ### Requirement: Threads expire after 4 days of inactivity
 Агент SHALL помечать треды как `expired` если `lastActivityAt < now - 4 * 86400 секунд`.
 
@@ -70,8 +70,6 @@
 #### Scenario: Expired thread not processed
 - **WHEN** найден тред с status='expired'
 - **THEN** новые сообщения в этом треде пропускаются, ответ не генерируется
-
----
 
 ### Requirement: telegram_get_messages returns replyToMsgId
 Инструмент `telegram_get_messages` SHALL включать в каждый объект сообщения необязательное поле `replyToMsgId: number | undefined` — ID сообщения, на которое данное сообщение является ответом.

@@ -1,4 +1,12 @@
-## ADDED Requirements
+# dm-history Specification
+
+## Purpose
+
+История отправленных личных сообщений (DM) — хранение диалогов, проверка
+cooldown повторной отправки, подсчёт дневного лимита, выборка активных
+диалогов.
+
+## Requirements
 
 ### Requirement: dm_history table exists
 Таблица `dm_history` SHALL быть создана в БД агента при первом write-вызове через `CREATE TABLE IF NOT EXISTS`. Колонки: `id`, `userId`, `userAccessHash`, `username`, `triggerText`, `dmText`, `sentAt`, `lastAgentMsgAt`, `replyCount`, `status`.

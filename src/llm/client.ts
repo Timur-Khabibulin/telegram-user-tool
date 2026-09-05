@@ -7,10 +7,31 @@ import { createFallback } from "ai-fallback";
 import { ZodError, type ZodType } from "zod";
 
 export interface LlmCompleteOptions {
-    /** Системное сообщение — персона агента из SOUL.md. */
-    system: string;
+    /**
+     * Системное сообщение — персона агента из SOUL.md. Опционально: вызывающий
+     * решает сам, нужна ли персона этому конкретному запросу (monitor-v4-comment-signal —
+     * решение по посту строится на голосе аудитории треда, а не персоны, поэтому
+     * не передаёт system вовсе). Не передан → `ai-sdk` не добавляет системное
+     * сообщение (`generateText`/`generateObject` сами принимают `system` как
+     * опциональный параметр).
+     */
+    system?: string;
     /** Пользовательский промпт шага скилла. */
     prompt: string;
+}
+
+/**
+ * `system` уходит в ai-sdk как обычное сообщение `input[]` (role system/developer)
+ * Responses API — рядовой элемент истории, не приоритетный канал. Codex OAuth
+ * обвязка (`openai-oauth-provider`) перед отправкой перезаписывает пустой строкой
+ * top-level поле `instructions` запроса, если оно не пришло явно — то есть
+ * привилегированный "кто ты" канал, который ждёт codex-backend, у нас всегда пуст
+ * (llm-instructions-field-fix). `providerOptions.openai.instructions` — то самое
+ * поле; дублируем туда персону, чтобы она реально доехала как system-level
+ * директива, а не только как рядовое сообщение в истории.
+ */
+function providerOptionsFor(system: string | undefined) {
+    return system ? { openai: { instructions: system } } : undefined;
 }
 
 export interface LlmClient {
@@ -134,14 +155,16 @@ export function createLlmClient(): LlmClient {
         },
 
         async complete({ system, prompt }) {
-            const { text } = await genText({ model, system, prompt });
+            const { text } = await genText({ model, system, prompt, providerOptions: providerOptionsFor(system) });
             return text;
         },
 
         async completeObject<T>({ system, prompt }: LlmCompleteOptions, schema?: ZodType<T>): Promise<T> {
+            const providerOptions = providerOptionsFor(system);
+
             // Без схемы валидировать нечего — свободный JSON одним проходом.
             if (!schema) {
-                const { text } = await genText({ model, system, prompt });
+                const { text } = await genText({ model, system, prompt, providerOptions });
                 return extractJson(text) as T;
             }
 
@@ -152,7 +175,7 @@ export function createLlmClient(): LlmClient {
             // спускаемся на текстовый путь. Сетевые/авторизационные ошибки тоже
             // приведут сюда — текстовый путь честно повторит запрос и пробросит их.
             try {
-                const { object } = await genObject({ model, system, prompt, schema });
+                const { object } = await genObject({ model, system, prompt, schema, providerOptions });
                 return object;
             } catch {
                 // structured output недоступен — fallback ниже
@@ -178,7 +201,7 @@ export function createLlmClient(): LlmClient {
                         `\n\nПрошлый ответ не прошёл валидацию: ${issues}. ` +
                         "Верни ТОЛЬКО валидный JSON с правильными типами — без markdown-ограждения, без пояснений.";
                 }
-                const { text } = await genText({ model, system, prompt: prompt + feedback });
+                const { text } = await genText({ model, system, prompt: prompt + feedback, providerOptions });
                 lastText = text;
                 try {
                     return schema.parse(extractJson(text));

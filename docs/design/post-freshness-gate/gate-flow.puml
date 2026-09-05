@@ -1,0 +1,48 @@
+@startuml post-freshness-gate-flow
+' Гейт свежести поста (R1-R4) - применяется к сообщению ПОСЛЕ classifyMessages
+' (general/newThread/threadReply), см. architecture.md, раздел 3.3.
+' isContinuation приходит из classifyMessages: general=false (включая служебную
+' копию поста - она тоже попадает в general, см. architecture.md §2.1),
+' newThread/threadReply=true.
+' Случай A / случай B - те же случаи, что в requirements-v1.md, раздел 5, шаг 2.
+
+start
+:непрочитанное сообщение
+(из бакета general / newThread / threadReply);
+
+if (isChannelPost? (fwd_from.channel_post присутствует - случай B)) then (да)
+  :postDate = собственная дата сообщения;
+  note right: без запроса к Telegram\nи без записи в кэш (дословно по алгоритму)
+elseif (replyToTopId присутствует? (случай A)) then (да)
+  if (дата поста ветки (chatId, replyToTopId) есть в кэше?) then (да)
+    :postDate = кэш;
+  else (нет)
+    :postDate = getMessageById(chatId, replyToTopId).date;
+    if (запрос успешен?) then (нет - ошибка/FLOOD_WAIT/не найдено)
+      #pink:R3 - исключить (fail-closed,\nне валит канал/прогон);
+      stop
+    else (да)
+      :сохранить (chatId, replyToTopId, postDate)\nв thread_post_dates, TTL 30 дней;
+    endif
+  endif
+else (нет ни одного признака)
+  #pink:R3 - исключить (no_thread);
+  stop
+endif
+
+if (isContinuation?) then (нет - R1, первый комментарий)
+  if (now - postDate < 24 часов?) then (да)
+    #palegreen:пройдено - кандидат на первый ответ (R1)\n(в т.ч. может быть сама копия поста);
+  else (нет)
+    #pink:R3 - исключить (пост старше 24ч);
+  endif
+else (да - R2, продолжение диалога)
+  if (now - postDate <= 4 дня?) then (да)
+    #palegreen:пройдено - кандидат на продолжение (R2);
+  else (нет)
+    #pink:R3 - исключить (пост старше 4 дней);
+  endif
+endif
+stop
+
+@enduml

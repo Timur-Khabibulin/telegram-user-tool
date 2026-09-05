@@ -21,6 +21,14 @@ metadata:
   принятых changes. Проект использует OpenSpec workflow (скиллы
   openspec-propose/apply/archive).
 - `docs/coding-standards.md`.
+- `docs/telegram-errors.md` — каталог RPC-ошибок MTProto/GramJS (три таблицы:
+  аккаунт/подключение №1–10, вступление в каналы №11–21, отправка сообщений
+  №22–32) со столбцами «Обработка as is»/«Обработка to be» — to-be это
+  требования на доработку. Раздел «Новые сущности (to be)» описывает
+  `agent_restrictions` (общая БД на все агенты, PK=agentId, banned/
+  need_update_session/suspend) и per-agent append-only лог ошибок
+  (skill_type/errorMessage/occured_at). Ревью проведено 2026-08-03 — см.
+  `[[project_telegram_errors_catalog_review]]` для найденных неоднозначностей.
 
 Ключевые контракты для анализа требований:
 - Статус-модель скилла `SkillStatus` (`src/skills/types.ts`): `{ status: "success"|"error"; terminal?: boolean; details: Record<string,unknown> }`. На неё завязаны все 5 скиллов (monitor, dm-send, dm-replies, account-warmup, join-queue) — менять контракт только с явного согласования.

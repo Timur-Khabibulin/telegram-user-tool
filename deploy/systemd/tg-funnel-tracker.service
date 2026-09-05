@@ -1,19 +1,22 @@
-# Дневная воронка по всем агентам → Saved Messages админ-аккаунта.
+# Дневная воронка по всем агентам → Saved Messages получателя отчётов.
 # Oneshot, запускается таймером tg-funnel-tracker.timer раз в день.
-# --admin <agentId>  — аккаунт-получатель отчёта (здесь: agent1).
+# --admin <agentId>   — владелец данных (funnel.db/reports/, здесь: agent1).
+# --send-as <agentId> — аккаунт-получатель отчёта (здесь: agent27, REPORT_AGENT_ID;
+#                       не выполняет рабочих задач, исключён из listAgentIds()).
 # ID приватного канала захардкожен в src/core/config.ts (FUNNEL_PRIVATE_CHANNEL_ID);
 # при необходимости его можно переопределить аргументом --private-channel <id>.
 
 [Unit]
-Description=Telegram funnel tracker (all agents -> admin Saved Messages)
+Description=Telegram funnel tracker (all agents -> report recipient Saved Messages)
 After=network.target
 
 [Service]
 Type=oneshot
 User=root
 WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
-ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/funnel-tracker.ts --admin agent1
+ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/funnel-tracker.ts --admin agent1 --send-as agent27
 EnvironmentFile=-/root/.openclaw/codex-auth/.env
+EnvironmentFile=-/root/.openclaw/secrets.env
 Slice=tg-agents.slice
 TimeoutStartSec=1800
 StandardOutput=journal

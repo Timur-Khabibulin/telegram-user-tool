@@ -5,7 +5,7 @@ context: |
   активность в группах и личке, копит DM-кандидатов, прогревает аккаунт, собирает
   воронку. Цель — рост приватного канала через живое вовлечение. См. docs/product.md.
 
-  Архитектура: общее ядро src/core/ + два входа — OpenClaw-плагин (src/index.ts)
+  Архитектура: общее ядро src/core/ + два входа — OpenClaw-плагин (./index.ts)
   и standalone-диспетчер (src/scripts/dispatcher.ts, запуск systemd-таймером).
   Скиллы (src/skills/*) — функции (SkillContext) => SkillStatus, вызываются
   диспетчером по таблице tasks. Данные — SQLite (better-sqlite3) в
@@ -14,16 +14,14 @@ context: |
   Стек: TypeScript (strict), tsx (без сборки), better-sqlite3, telegram (GramJS),
   ai-sdk + codex OAuth. Стандарт кода — docs/coding-standards.md.
 
-  База знаний и правила разработки: docs/README.md, docs/workflow.md,
+  База знаний и правила разработки: docs/README.md,
   docs/agent-playbook.md. Аналитика фич для человека — docs/design/<feature>/;
   здесь, в openspec, — нормативное поведение для агента.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Не пересказывать требования, уже зафиксированные в docs/design/<feature>/requirements-v<N>.md — ссылаться на документ, не дублировать содержание.
+ # spec:
+  #  - Requirement — через SHALL; Scenario — через WHEN/THEN (см. существующие openspec/specs/*/spec.md как образец формата).
+  tasks:
+    - Не включать задачи на написание юнит-тестов, реальные прогоны/деплой, отладку и наблюдение за работой после отладки — это не входит в разбивку задач change'а.

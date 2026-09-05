@@ -18,6 +18,8 @@ export interface RunRow {
     status: "success" | "error";
     error: string | null; // NULL при success
     llmCalls: number;
+    cpuUserMs: number;   // process.cpuUsage().user, снятый вокруг вызова скилла
+    cpuSystemMs: number; // process.cpuUsage().system, снятый вокруг вызова скилла
 }
 
 function openDb(dbPath: string): Database.Database {
@@ -42,6 +44,17 @@ function ensureTable(db: Database.Database, dbPath: string): void {
         );
         CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(startedAt);
     `);
+    // Аддитивная миграция: CPU-поля добавлены позже (predictable-agent-scheduling) —
+    // у уже существующих БД их может не быть, ALTER TABLE ADD COLUMN не имеет
+    // IF NOT EXISTS в SQLite, поэтому проверяем через pragma table_info.
+    const columns = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[];
+    const columnNames = new Set(columns.map((c) => c.name));
+    if (!columnNames.has("cpuUserMs")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN cpuUserMs INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!columnNames.has("cpuSystemMs")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN cpuSystemMs INTEGER NOT NULL DEFAULT 0`);
+    }
     initializedDbs.add(dbPath);
 }
 
@@ -59,15 +72,24 @@ export function ensureRunsSchema(agentId: string): void {
 /** Записать прогон. `createdAt` ставится автоматически. */
 export function insertRun(
     agentId: string,
-    row: { type: TaskType; startedAt: number; durationMs: number; status: "success" | "error"; error: string | null; llmCalls: number },
+    row: {
+        type: TaskType;
+        startedAt: number;
+        durationMs: number;
+        status: "success" | "error";
+        error: string | null;
+        llmCalls: number;
+        cpuUserMs: number;
+        cpuSystemMs: number;
+    },
 ): void {
     const dbPath = tasksDbPath(agentId);
     const db = openDb(dbPath);
     try {
         ensureTable(db, dbPath);
         db.prepare(`
-            INSERT INTO runs (agentId, type, startedAt, durationMs, status, error, llmCalls, createdAt)
-            VALUES (@agentId, @type, @startedAt, @durationMs, @status, @error, @llmCalls, @createdAt)
+            INSERT INTO runs (agentId, type, startedAt, durationMs, status, error, llmCalls, cpuUserMs, cpuSystemMs, createdAt)
+            VALUES (@agentId, @type, @startedAt, @durationMs, @status, @error, @llmCalls, @cpuUserMs, @cpuSystemMs, @createdAt)
         `).run({
             agentId,
             type: row.type,
@@ -76,6 +98,8 @@ export function insertRun(
             status: row.status,
             error: row.error ?? null,
             llmCalls: row.llmCalls,
+            cpuUserMs: row.cpuUserMs,
+            cpuSystemMs: row.cpuSystemMs,
             createdAt: Math.floor(Date.now() / 1000),
         });
     } finally {
@@ -95,7 +119,7 @@ export function getRunsBetween(agentId: string, startSec: number, endSec: number
     try {
         ensureTable(db, dbPath);
         return db.prepare(`
-            SELECT agentId, type, startedAt, durationMs, status, error, llmCalls
+            SELECT agentId, type, startedAt, durationMs, status, error, llmCalls, cpuUserMs, cpuSystemMs
             FROM runs
             WHERE startedAt >= @startSec AND startedAt < @endSec
             ORDER BY startedAt ASC

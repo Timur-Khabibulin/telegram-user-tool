@@ -15,6 +15,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 
 import type { Logger } from "./logger";
+import { REPORT_AGENT_ID } from "./config";
 import {
     ensureTasksSchema,
     upsertTask,
@@ -22,6 +23,7 @@ import {
     disableTask,
     countActiveTasks,
     listTasks,
+    computeDefaultSchedule,
     type TaskType,
     type TaskRow,
 } from "./db/tasks";
@@ -78,14 +80,32 @@ export interface UpsertTaskResult {
  * Создать или обновить задачу (6.1) и, если это первая активная задача агента,
  * включить heartbeat-таймер (6.2). При наличии других активных задач таймер уже
  * крутится — его не трогаем.
+ *
+ * `schedule`/`tz` опциональны (agent-schedule-offset): если не переданы явно,
+ * вычисляются через `computeDefaultSchedule` — периодические задачи получают
+ * round-robin фазу старта (равномерно распределённую между агентами), вместо
+ * одинакового для всех дефолта. Явно переданное значение используется как
+ * есть, без пересчёта.
  */
 export async function createOrUpdateTask(
-    params: { agentId: string; type: TaskType; schedule: string; tz: string },
+    params: { agentId: string; type: TaskType; schedule?: string; tz?: string },
     log: Logger,
 ): Promise<UpsertTaskResult> {
-    const { agentId, type, schedule, tz } = params;
+    const { agentId, type } = params;
+
+    // REPORT_AGENT_ID зарезервирован для получения отчётов — не выполняет
+    // рабочих задач, постановка в расписание для него запрещена.
+    if (agentId === REPORT_AGENT_ID) {
+        throw new Error(
+            `agent=${agentId} is REPORT_AGENT_ID — reserved for reports, cannot schedule tasks for it`,
+        );
+    }
 
     ensureTasksSchema(agentId);
+
+    const { schedule, tz } = params.schedule && params.tz
+        ? { schedule: params.schedule, tz: params.tz }
+        : computeDefaultSchedule(type);
 
     // «Первая задача» = до upsert нет ни одной активной (enabled=1). Этот же
     // сигнал верен и когда все прежние задачи были выключены (терминальный
@@ -127,6 +147,55 @@ export async function triggerTaskNow(
 
     const systemctlResult = await systemctl(["start", serviceUnit(agentId)], log);
     return { agentId, type, systemctl: systemctlResult };
+}
+
+// ─── Ручной запуск channel-activity-update (channel-activity-percentiles) ──
+
+/** Допустимые символы agentId — то же множество, что разрешено в имени systemd-юнита (instance). */
+const AGENT_ID_PATTERN = /^[A-Za-z0-9_]+$/;
+
+export interface TriggerActivityUpdateResult {
+    /** Инстанс шаблонного юнита, собранный из agentIds/limit. */
+    instance: string;
+    systemctl: SystemctlResult;
+}
+
+/**
+ * Запускает `tg-channel-activity-update-manual@<instance>.service` — ручной
+ * пересчёт охвата (avg_views/subs_count) и активности чата (active_writers_p50/p90)
+ * для явно перечисленных агентов, TTL игнорируется (design.md channel-activity-percentiles).
+ * Не дожидается завершения прогона (может идти минуты-часы) — только факт
+ * успешного запуска юнита; результат — в channels.db агентов и в journalctl.
+ *
+ * instance строится как `agentId1-agentId2-...` с необязательным суффиксом
+ * `.limitN`. agentId проверяется по `AGENT_ID_PATTERN` до подстановки в имя
+ * юнита — instance идёт в `systemctl start <unit>@<instance>.service`
+ * (execFile, без shell), но сама систем­d-строка юнита должна остаться в
+ * допустимом множестве символов, иначе systemctl откажет с непонятной ошибкой.
+ */
+export async function triggerActivityUpdate(
+    agentIds: string[],
+    limit: number | undefined,
+    log: Logger,
+): Promise<TriggerActivityUpdateResult> {
+    if (agentIds.length === 0) {
+        throw new Error("agentIds must not be empty");
+    }
+    for (const id of agentIds) {
+        if (!AGENT_ID_PATTERN.test(id)) {
+            throw new Error(`invalid agentId "${id}" — must match ${AGENT_ID_PATTERN}`);
+        }
+    }
+    if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
+        throw new Error(`invalid limit "${limit}" — must be a positive integer`);
+    }
+
+    const instance = agentIds.join("-") + (limit !== undefined ? `.limit${limit}` : "");
+    const systemctlResult = await systemctl(
+        ["start", `tg-channel-activity-update-manual@${instance}.service`],
+        log,
+    );
+    return { instance, systemctl: systemctlResult };
 }
 
 // ─── 6.4 — удалить задачу, при необходимости погасить таймер ──────────────

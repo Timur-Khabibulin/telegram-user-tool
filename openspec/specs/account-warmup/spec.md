@@ -1,4 +1,11 @@
-## ADDED Requirements
+# account-warmup Specification
+
+## Purpose
+
+Периодическое «прогревание» аккаунта — фоновое чтение непрочитанных чатов и
+разметка их прочитанными без ответов, чтобы аккаунт выглядел активным.
+
+## Requirements
 
 ### Requirement: Agent reads unread chats and marks them as read
 

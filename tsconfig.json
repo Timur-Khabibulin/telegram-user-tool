@@ -10,5 +10,5 @@
     "moduleResolution": "bundler",
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["index.ts", "src"]
 }

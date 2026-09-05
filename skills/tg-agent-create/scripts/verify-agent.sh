@@ -45,10 +45,11 @@ else
   mark "  [✗] B1 — tg-account.json НЕ валиден"
 fi
 
-if [ -s "$ws/SOUL.md" ]; then
-  mark "  [✓] B2 — SOUL.md непустой"
+persona=$(jq -r '.persona // empty' "$ws/tg-account.json" 2>/dev/null)
+if [ -n "$persona" ] && [ -s "$HOME/.openclaw/personas/$persona/SOUL.md" ]; then
+  mark "  [✓] B2 — persona=\"$persona\", SOUL.md шаблона непустой"
 else
-  mark "  [✗] B2 — SOUL.md пуст"
+  mark "  [✗] B2 — persona не задана в tg-account.json, либо ~/.openclaw/personas/$persona/SOUL.md отсутствует/пуст"
 fi
 
 if [ -s "$ad/auth-profiles.json" ] && [ -s "$ad/models.json" ]; then

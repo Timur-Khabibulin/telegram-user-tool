@@ -1,17 +1,18 @@
-# Дневная сводка прогонов по всем агентам → Saved Messages админ-аккаунта.
+# Дневная сводка прогонов по всем агентам → Saved Messages получателя отчётов.
 # Oneshot, запускается таймером tg-daily-summary.timer раз в день.
-# --admin <agentId> задаёт аккаунт-получатель сводки (здесь: agent1).
+# --send-as <agentId> задаёт аккаунт-получатель сводки (здесь: agent27, REPORT_AGENT_ID).
 
 [Unit]
-Description=Telegram daily run summary (all agents -> admin Saved Messages)
+Description=Telegram daily run summary (all agents -> report recipient Saved Messages)
 After=network.target
 
 [Service]
 Type=oneshot
 User=root
 WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
-ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/daily-summary.ts --admin agent1
+ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/daily-summary.ts --send-as agent27
 EnvironmentFile=-/root/.openclaw/codex-auth/.env
+EnvironmentFile=-/root/.openclaw/secrets.env
 Slice=tg-agents.slice
 TimeoutStartSec=600
 StandardOutput=journal

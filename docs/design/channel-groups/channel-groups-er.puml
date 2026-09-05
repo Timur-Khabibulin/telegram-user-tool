@@ -1,0 +1,81 @@
+@startuml channel-groups-er
+title Группы каналов — доменная модель (ER)
+
+' === Стиль ===
+hide circle
+skinparam shadowing false
+skinparam linetype ortho
+skinparam defaultFontName "Segoe UI"
+skinparam entity {
+  BackgroundColor White
+  BorderColor #34495E
+  ArrowColor #34495E
+}
+
+' === Легенда нотации ===
+legend left
+  Нотация: crow's foot (information engineering)
+  * — обязательное поле   <<PK>> — первичный ключ   <<FK>> — внешний ключ
+  ||--o{ — один ко многим (0..N)
+endlegend
+
+' === Сущности ===
+entity "brand" as brand {
+  * id : integer <<PK>>
+  --
+  * name : text
+  persona : text
+  topics_a : text
+}
+
+entity "group" as group {
+  * id : integer <<PK>>
+  --
+  * brand_id : integer <<FK>>
+  * name : text
+  topics_b : text
+  subs_min : integer
+  subs_max : integer
+  er_min : real
+  er_max : real
+  invite_link : text
+}
+
+entity "account" as account {
+  * agent_id : text <<PK>>
+  --
+  * group_id : integer <<FK>>
+}
+
+entity "discovered_channel" as discovered_channel {
+  * canonical_link : text <<PK>>
+  --
+  * brand_id : integer <<FK>>
+  source : text
+  topic : text
+  subscribers : integer
+  er : real
+  group_id : integer
+  assigned_agent : text
+  status : text
+}
+
+' === Связи ===
+brand ||--o{ group   : направления
+brand ||--o{ discovered_channel  : реестр
+group ||--o{ account  : аккаунты
+
+' === Примечания ===
+note bottom of group
+  Инварианты:
+  • критерии разных групп не пересекаются
+  • диапазоны только расширяются, не сужаются
+end note
+
+note bottom of discovered_channel
+  source — источник находки: discovery | similar
+  group_id / assigned_agent — результат раскладки
+  (NULL, пока status = unassigned)
+end note
+
+@enduml

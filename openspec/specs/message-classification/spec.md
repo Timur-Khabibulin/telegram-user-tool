@@ -1,4 +1,11 @@
-## ADDED Requirements
+# message-classification Specification
+
+## Purpose
+
+Классификация сырых сообщений группы на общие сообщения, новые треды и
+продолжения тредов — единая точка для последующей обработки скиллом.
+
+## Requirements
 
 ### Requirement: tg_classify_messages classifies raw messages into three categories
 

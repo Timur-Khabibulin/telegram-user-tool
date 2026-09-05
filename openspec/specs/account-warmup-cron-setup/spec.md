@@ -1,4 +1,11 @@
-## ADDED Requirements
+# account-warmup-cron-setup Specification
+
+## Purpose
+
+Регистрация периодической cron-задачи, запускающей скилл `account-warmup`
+по расписанию.
+
+## Requirements
 
 ### Requirement: Cron-setup skill registers account-warmup on a 5-hour schedule
 

@@ -1,0 +1,62 @@
+@startuml post-comment-review-flow
+' Поток ручного подтверждения комментария перед отправкой (post-comment-review,
+' design.md). Два независимых процесса: dispatcher-прогон агента (короткий,
+' завершается независимо от решения человека) и review-listener (персистентный,
+' один на всю платформу). Связь между ними - только через БД (pending_reviews)
+' и Bot API, не через общий процесс/память.
+'
+' Номера шагов соответствуют разделам design.md (Decisions 1-7).
+
+participant "dispatcher\n(agent N)" as D
+database "channels.db\n(agent N)" as DB
+participant "Bot API" as BOT
+participant "Чат ревьюеров" as CHAT
+participant "review-listener\n(один на платформу)" as RL
+
+== monitor-v3: LLM решила прокомментировать, review-gate включён (Decision 1) ==
+
+D -> D: getDiscussionMessage (rootMsgId)
+D -> DB: INSERT pending_reviews\n(chatId, postText, comment, rootMsgId, status=pending)
+D -> BOT: sendMessage(чат ревьюеров,\nпост + комментарий + [Да|Нет])
+note right of D
+  обычный REST-вызов, не long-poll -
+  безопасно вызывать параллельно из
+  скольких угодно агентских прогонов
+  одновременно (Decision 2)
+end note
+BOT -> CHAT: показать сообщение с кнопками
+D -> DB: markChannelProcessed
+note right of D
+  прогон НЕ ждёт ответа -
+  переходит к следующему каналу
+  (Decision 1)
+end note
+D -> D: disconnect, прогон завершён
+
+== ожидание: от секунд до часов, таймаута нет (Non-Goal) ==
+
+CHAT -> RL: нажатие кнопки Да/Нет\n(callback_query, review-id)
+note right of RL
+  единственный потребитель getUpdates
+  на весь общий токен бота (Decision 2) -
+  агент определяется по review-id →
+  pending_reviews.agentId, не по боту
+end note
+
+alt Да
+  RL -> DB: SELECT pending_reviews[review-id]\n→ agentId, chatId, comment, rootMsgId
+  RL -> RL: TelegramService.loadAccount(agentId)\n(новое MTProto-соединение, Decision 4)
+  RL -> DB: InputPeerChannel(chatId, chatAccessHash)\n— без похода в getDialogs (Decision 5)
+  RL -> CHAT: replyToMessage(chatId, rootMsgId, comment)
+  RL -> DB: applyApprovedComment(...)\n(createGroupThread + savePostWatchComment\n+ markChannelStatus(only_comment) + saveReply)
+  RL -> RL: disconnect MTProto
+else Нет
+  RL -> DB: markPostSeen(agentId, chatId, postId)
+  note right of RL: чистый DB-write,\nMTProto не нужен (Decision 7)
+end
+
+RL -> BOT: editMessageReplyMarkup / editMessageText\n(убрать кнопки, показать исход)
+RL -> BOT: answerCallbackQuery
+BOT -> CHAT: обновить сообщение
+
+@enduml

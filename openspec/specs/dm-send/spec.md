@@ -41,10 +41,10 @@ TBD - normalized from legacy archive format. Update Purpose after archive.
    - Вызвать `telegram_send_dm`
    - `ok` → `dm_threads_create(userId, userAccessHash, userName, fromChatId, triggerMessage, firstMessage)`, пометить кандидата `sent`, `sentThisRun++`, `sentToday++`, подождать 30–60с
    - `peer_id_invalid` → пометить `skipped`, перейти к следующему (без паузы)
-   - `peer_flood` → немедленно завершить прогон
-   - `flood_wait` → `floodErrors++`; если `floodErrors >= 5` — завершить; иначе перейти к следующему
+   - `peer_flood` → немедленно завершить прогон; **дополнительно** создать/обновить `agent_restrictions(suspend, restriction_duration=86400)` и запись в `error_log` (`skill_type='dm-send'`) — см. `agent-restrictions` Requirement «Триггеры создания ограничения»
+   - `flood_wait` → до 2 повторов ожидания (см. `group-monitoring` Requirement «Политика повтора FLOOD_WAIT/SLOWMODE_WAIT»); если исчерпаны — `floodErrors++`; если `floodErrors >= 5` — завершить; иначе перейти к следующему
+   - `deactivated` → пометить `deactivated`, **дополнительно** создать/обновить `agent_restrictions(banned)` и запись в `error_log` (`skill_type='dm-send'`) — ошибка одного получателя останавливает весь агент до ручного снятия ограничения; перейти к следующему кандидату (в рамках уже начатого прогона — прогон не прерывается этим шагом, ограничение блокирует только СЛЕДУЮЩИЕ прогоны)
    - `privacy_blocked` → пометить `privacy_blocked`, перейти к следующему
-   - `deactivated` → пометить `deactivated`, перейти к следующему
    - Любая другая ошибка → пометить `skipped`, перейти к следующему
 7. Итоговое уведомление в Saved Messages
 
@@ -80,15 +80,58 @@ TBD - normalized from legacy archive format. Update Purpose after archive.
 - **WHEN** `telegram_send_dm` возвращает `{ error: 'privacy_blocked' }`
 - **THEN** кандидат помечается `privacy_blocked`, цикл продолжается без паузы
 
-#### Scenario: flood_wait — single occurrence
-- **WHEN** `telegram_send_dm` возвращает `{ error: 'flood_wait' }` и `floodErrors < 5`
+#### Scenario: flood_wait — исчерпаны повторы
+- **WHEN** `telegram_send_dm` вернул `{ error: 'flood_wait' }` после исчерпания
+  повторов ожидания и `floodErrors < 5`
 - **THEN** кандидат пропускается, `floodErrors` увеличивается на 1, цикл продолжается
 
 #### Scenario: flood_wait — limit exceeded
 - **WHEN** `floodErrors` достигает 5
 - **THEN** прогон немедленно завершается, скилл переходит к итоговому уведомлению
 
-#### Scenario: peer_flood — immediate stop
+#### Scenario: peer_flood — immediate stop и ограничение агента
 - **WHEN** `telegram_send_dm` возвращает `{ error: 'peer_flood' }`
-- **THEN** прогон немедленно завершается, статус кандидата остаётся `pending`
+- **THEN** прогон немедленно завершается, статус кандидата остаётся `pending`;
+  создаётся/обновляется `agent_restrictions(suspend, restriction_duration=86400)`
+  и запись в `error_log`
+
+#### Scenario: deactivated — пометка кандидата и ограничение агента
+- **WHEN** `telegram_send_dm` возвращает `{ error: 'deactivated' }`
+- **THEN** кандидат помечается `deactivated`; создаётся/обновляется
+  `agent_restrictions(banned)` и запись в `error_log`; текущий прогон
+  продолжается (ограничение блокирует только следующие прогоны диспетчера)
+
+### Requirement: Запись ошибки отправки DM
+
+Скилл `dm-send` SHALL записывать в таблицу `send_errors` (`chatId =
+candidate.sourceChatId`, `occurredAt`, `source = 'dm_send'`, `errorCode`)
+каждый исход ошибки `telegram_send_dm` (`peer_flood`, `flood_wait`,
+`privacy_blocked`, `deactivated`, `peer_id_invalid` и любой иной), не изменяя
+существующую логику управления потоком (`stopReason`, `floodErrors`,
+переходы `break`/`continue`).
+
+#### Scenario: peer_flood записывается перед остановкой прогона
+
+- **WHEN** `telegram_send_dm` возвращает `{ error: 'peer_flood' }`
+- **THEN** ошибка записывается в `send_errors` с `errorCode = 'peer_flood'`, после чего прогон завершается как и прежде (кандидат остаётся `pending`)
+
+#### Scenario: flood_wait записывается на каждое повторение
+
+- **WHEN** `telegram_send_dm` возвращает `{ error: 'flood_wait' }`
+- **THEN** ошибка записывается в `send_errors` с `errorCode = 'flood_wait'` при каждом таком исходе, `floodErrors` увеличивается как и прежде
+
+#### Scenario: privacy_blocked и deactivated записываются
+
+- **WHEN** `telegram_send_dm` возвращает `{ error: 'privacy_blocked' }` или `{ error: 'deactivated' }`
+- **THEN** ошибка записывается в `send_errors` с соответствующим `errorCode`, кандидат помечается как и прежде, цикл продолжается без паузы
+
+#### Scenario: peer_id_invalid и прочие ошибки записываются
+
+- **WHEN** `telegram_send_dm` возвращает `{ error: 'peer_id_invalid' }` или иную неизвестную ошибку
+- **THEN** ошибка записывается в `send_errors` с этим `errorCode`, кандидат помечается `skipped` как и прежде
+
+#### Scenario: Успешная отправка не пишет ошибку
+
+- **WHEN** `telegram_send_dm` возвращает `{ ok: true }`
+- **THEN** в `send_errors` ничего не записывается
 

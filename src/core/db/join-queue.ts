@@ -1,21 +1,30 @@
 // core/db/join-queue.ts — очередь каналов для вступления в discussion-группы.
 //
 // Перенесено из прежнего join-queue-db.ts: тела инструментов превращены в обычные
-// функции без TypeBox и без формата { content: [...] }. Поведение, схема и
-// status-модель сохранены (R-B2). Логирование инжектируется через Logger (DIP).
+// функции без TypeBox и без формата { content: [...] }. Логирование инжектируется
+// через Logger (DIP).
+//
+// Статусная модель telegram-error-handling (заменяет прежнюю — там всё было
+// наоборот: error ретраился автоматически до MAX_ATTEMPTS раз, skipped был
+// постоянным статусом, снимался только вручную resetSkippedToPending):
 //
 //   pending ──get_batch──► processing ──update("joined")──► joined
 //                │                    └──update("skipped")─► skipped
 //                │                    └──update("error")──► error
 //                │                    └──timeout reset──────► pending
-//   error ──get_batch (attempts < MAX_ATTEMPTS)──► processing
+//   skipped ──перед каждым следующим батчем──► pending (автоматически)
+//   error ── не ретраится автоматически, снимается только вручную
 //
 //  pending:    ожидает обработки (начальное состояние)
 //  processing: взят в батч; если запись не обновлена дольше
 //              PROCESSING_TIMEOUT_SECONDS — сбрасывается обратно в pending
 //  joined:     успешно вступили (финальный)
-//  skipped:    пропущен навсегда — приватный канал, нет discussion group и т.п.
-//  error:      временная ошибка; повтор до MAX_ATTEMPTS раз, затем остаётся error
+//  skipped:    временная причина отказа (флуд после исчерпания повторов,
+//              CHANNELS_TOO_MUCH) — перед взятием каждого следующего батча
+//              автоматически переводится обратно в pending
+//  error:      постоянная причина отказа (канал непригоден для вступления
+//              независимо от повторных попыток) — не ретраится, снимается
+//              только вручную человеком
 
 import Database from "better-sqlite3";
 import { joinQueueDbPath } from "../config";
@@ -24,7 +33,6 @@ import type { Logger } from "../logger";
 // ─── Constants ────────────────────────────────────────────────────────
 
 const DEFAULT_BATCH_LIMIT = 15;
-const MAX_ATTEMPTS = 3;
 const PROCESSING_TIMEOUT_SECONDS = 3600;
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -91,14 +99,23 @@ export function getJoinQueueBatch(agentId: string, log: Logger, limit = DEFAULT_
                 log.warn(`[tg-join-queue] get_batch — reset ${reset.changes} stale processing entries`);
             }
 
-            // Забрать следующий батч
+            // skipped — временная причина отказа: возвращается в pending перед
+            // каждым следующим батчем (telegram-error-handling).
+            const unskip = db.prepare(`
+                UPDATE join_queue SET status = 'pending', updatedAt = ? WHERE status = 'skipped'
+            `).run(now);
+            if (unskip.changes > 0) {
+                log.info(`[tg-join-queue] get_batch — ${unskip.changes} skipped entries returned to pending`);
+            }
+
+            // Забрать следующий батч. error — постоянная причина отказа, не
+            // ретраится автоматически (telegram-error-handling).
             const rows = db.prepare(`
                 SELECT link FROM join_queue
                 WHERE status = 'pending'
-                   OR (status = 'error' AND attempts < ?)
                 ORDER BY updatedAt ASC
                 LIMIT ?
-            `).all(MAX_ATTEMPTS, limit) as { link: string }[];
+            `).all(limit) as { link: string }[];
 
             if (rows.length > 0) {
                 const placeholders = rows.map(() => "?").join(",");
@@ -137,6 +154,40 @@ export function updateJoinQueue(
             WHERE link = ?
         `).run(status, error ?? null, now, link);
         return { ok: true };
+    } finally {
+        db.close();
+    }
+}
+
+/** Ссылки каналов, в которые агент успешно вступил (status='joined') — для backfill реестра discovery. */
+export function getJoinedLinks(agentId: string, log: Logger): string[] {
+    log.info(`[tg-join-queue] tg_join_queue_joined_links — agentId=${agentId}`);
+    const db = openDb(joinQueueDbPath(agentId));
+    try {
+        ensureTable(db);
+        const rows = db.prepare(`SELECT link FROM join_queue WHERE status = 'joined'`).all() as { link: string }[];
+        return rows.map((r) => r.link);
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Разовый бэкфилл (flood-wait-detection, design.md Migration Plan): сбрасывает все
+ * `status='skipped'` обратно в `pending` с `attempts=0` — ссылки проходят повторную
+ * обработку через уже исправленную flood-детекцию вместо того, чтобы оставаться
+ * помеченными пропущенными навсегда из-за старого бага классификации. Идемпотентно
+ * (повторный вызов просто даёт ещё одну попытку уже осевшим обратно в skipped
+ * строкам), но не бесплатно — вызывать один раз после деплоя фикса, не по расписанию
+ * (см. `scripts/join-queue-backfill.ts`).
+ */
+export function resetSkippedToPending(agentId: string, log: Logger): { reset: number } {
+    const db = openDb(joinQueueDbPath(agentId));
+    try {
+        ensureTable(db);
+        const result = db.prepare(`UPDATE join_queue SET status = 'pending', attempts = 0 WHERE status = 'skipped'`).run();
+        log.info(`[tg-join-queue] resetSkippedToPending — agentId=${agentId} reset=${result.changes}`);
+        return { reset: result.changes };
     } finally {
         db.close();
     }

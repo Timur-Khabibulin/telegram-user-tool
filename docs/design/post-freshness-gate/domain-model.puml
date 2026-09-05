@@ -1,0 +1,53 @@
+@startuml post-freshness-domain-model
+' Доменная модель поста, чата обсуждения и ветки комментариев Telegram.
+' Источник — официальная документация Telegram (core.telegram.org/api/discussion,
+' core.telegram.org/api/threads) и клиентской библиотеки GramJS (gram.js.org).
+' Пояснения к полям — см. requirements-v1.md, раздел 2.
+
+hide circle
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam shadowing false
+
+entity "Канал" as Channel {
+    id
+}
+
+entity "Чат обсуждения" as DiscussionChat {
+    id
+}
+
+entity "Пост" as Post {
+    id
+    date
+    peerId
+}
+
+entity "Служебная копия поста" as PostCopy {
+    id
+    date
+    peerId
+}
+
+entity "Ветка комментариев" as Thread {
+    topMsgId
+}
+
+entity "Сообщение / комментарий" as Comment {
+    id
+    peerId
+    replyTo_replyToMsgId
+    replyTo_replyToTopId
+    fwdFrom_channelPost
+}
+
+Channel        ||--||  DiscussionChat : ChannelFull.linkedChatId
+Post           }o--||  Channel        : Message.peerId = PeerChannel(канал.id)
+PostCopy       }o--||  DiscussionChat : Message.peerId (лежит в чате)
+Comment        }o--||  DiscussionChat : Message.peerId (лежит в чате)
+PostCopy       ||..||  Post           : MessageFwdHeader.channelPost (копия ссылается на пост)
+Thread         ||--||  PostCopy       : id копии = topMsgId ветки
+Comment        }o--||  Thread         : MessageReplyHeader.replyToTopId
+Comment        |o--||  Comment        : MessageReplyHeader.replyToMsgId (родитель)
+
+@enduml

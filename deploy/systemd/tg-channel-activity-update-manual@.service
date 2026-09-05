@@ -1,0 +1,39 @@
+# Ручной запуск channel-activity-update.ts для конкретных агентов, в обход
+# TTL — вызывается из OpenClaw-инструмента tg_channel_activity_update
+# (index.ts, через triggerActivityUpdate в scheduler-control.ts):
+# `systemctl start tg-channel-activity-update-manual@<instance>.service`.
+#
+# Формат instance (%i), собирается вызывающей стороной:
+#   agentId1-agentId2-...        → --agents agentId1,agentId2,...
+#   ...с суффиксом .limitN       → плюс --limit N
+# Примеры: agent10 · agent10-agent27 · agent10.limit5 · agent10-agent27.limit5
+#
+# В отличие от tg-channel-activity-update.service (плановый режим, только
+# просроченные по TTL каналы), здесь TTL полностью игнорируется —
+# пересчитываются ВСЕ каналы перечисленных агентов (design.md
+# channel-activity-percentiles, ручной режим).
+#
+# Разбор %i вынесен в отдельный shell-файл (channel-activity-update-manual.sh)
+# — не инлайн в ExecStart=: systemd сам пытается развернуть $-конструкции
+# ExecStart= (даже внутри `bash -c '...'`) ДО того, как их увидит bash, и
+# ловит bash-параметр-expansion (${I%...}) как обращение к несуществующей
+# переменной окружения ("Invalid environment variable name"). %i передаётся
+# скрипту позиционным аргументом — там $ не нужен, коллизии нет.
+
+[Unit]
+Description=Telegram channel activity/coverage manual update for %i
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
+ExecStart=/usr/bin/bash /root/.openclaw/extensions/telegram-user-tool/src/scripts/channel-activity-update-manual.sh %i
+EnvironmentFile=-/root/.openclaw/codex-auth/.env
+EnvironmentFile=-/root/.openclaw/secrets.env
+# Свой slice (не tg-agents.slice) — см. tg-channel-activity-update.slice.
+Slice=tg-channel-activity-update.slice
+# Без потолка на время — см. tg-channel-activity-update.service.
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal

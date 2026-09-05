@@ -1,0 +1,26 @@
+# Ежедневный пересчёт метрик канала по всем агентам: охват (avg_views/
+# subs_count, было tg-channel-coverage-update) и активность чата
+# (active_writers_p50/p90, channel-activity-percentiles) — один скрипт,
+# каждая группа метрик пересчитывается по своему TTL (30 дней).
+# Oneshot, запускается таймером tg-channel-activity-update.timer.
+
+[Unit]
+Description=Telegram channel activity and coverage metrics update (all agents)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
+ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/channel-activity-update.ts
+EnvironmentFile=-/root/.openclaw/codex-auth/.env
+EnvironmentFile=-/root/.openclaw/secrets.env
+# Свой slice (не tg-agents.slice) — изолирует память этого джоба от бюджета
+# диспетчеров агентов, см. tg-channel-activity-update.slice.
+Slice=tg-channel-activity-update.slice
+# Без потолка на время (design.md channel-activity-percentiles, Decision 3) —
+# полная история чата за 30 дней может занять на порядки дольше, чем дефолтный
+# TimeoutStartSec (обычно 90с), которым systemd убил бы процесс на середине.
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal

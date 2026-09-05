@@ -7,8 +7,12 @@
 
 import type { SkillContext, SkillStatus } from "./types";
 import { sleep, randomDelayMs } from "./util";
-import { expireOldDmCandidates, getPendingDmCandidates, updateDmCandidateStatus } from "../core/db/channels";
+import { ClientNotConnectedError } from "../core/telegram/errors";
+import { expireOldDmCandidates, getPendingDmCandidates, updateDmCandidateStatus, recordSendError } from "../core/db/channels";
 import { dmThreadExists, deleteDmThread, createDmThread, countDmThreadsToday } from "../core/db/dm-threads";
+import { upsertRestriction } from "../core/db/agent-restrictions";
+import { recordAccountError } from "../core/db/error-log";
+import { FUNNEL_ADMIN_AGENT_ID } from "../core/config";
 import { generateDM } from "../llm/prompts";
 
 const DAILY_LIMIT = 15;
@@ -82,6 +86,7 @@ export async function runDmSend(ctx: SkillContext): Promise<SkillStatus> {
                 text: dmText,
             });
         } catch (err: any) {
+            if (err instanceof ClientNotConnectedError) throw err;
             // Любая непредвиденная ошибка → skipped, без 5c, без паузы
             log.warn(`[dm-send] send_dm unexpected error for userId=${candidate.userId}: ${err.message ?? err}`);
             updateDmCandidateStatus(agentId, candidate.id, "skipped", log);
@@ -89,8 +94,16 @@ export async function runDmSend(ctx: SkillContext): Promise<SkillStatus> {
         }
 
         if ("error" in sendResult) {
+            // Этап 4 воронки: зафиксировать факт ошибки отправки на канал
+            // (sourceChatId кандидата). Перед существующей логикой управления —
+            // stopReason/floodErrors/статусы кандидата не меняются.
+            recordSendError(agentId, { chatId: candidate.sourceChatId, source: "dm_send", errorCode: sendResult.error }, log);
             if (sendResult.error === "peer_flood") {
-                // Временный бан на рассылку — немедленно прервать, кандидат остаётся pending
+                // Временный бан на рассылку — немедленно прервать, кандидат остаётся
+                // pending. Дополнительно ограничить агента (telegram-error-handling
+                // №29) — блокирует только СЛЕДУЮЩИЕ прогоны диспетчера.
+                upsertRestriction(FUNNEL_ADMIN_AGENT_ID, agentId, "suspend", "PEER_FLOOD", 86400);
+                recordAccountError(agentId, "dm-send", "PEER_FLOOD");
                 stopReason = "peer_flood";
                 break;
             }
@@ -107,7 +120,12 @@ export async function runDmSend(ctx: SkillContext): Promise<SkillStatus> {
                 continue;
             }
             if (sendResult.error === "deactivated") {
+                // Ошибка одного получателя останавливает весь агент до ручного
+                // снятия ограничения (telegram-error-handling №5/6) — сам прогон
+                // продолжается, ограничение блокирует только следующие прогоны.
                 updateDmCandidateStatus(agentId, candidate.id, "deactivated", log);
+                upsertRestriction(FUNNEL_ADMIN_AGENT_ID, agentId, "banned", "USER_DEACTIVATED", null);
+                recordAccountError(agentId, "dm-send", "USER_DEACTIVATED");
                 continue;
             }
             // peer_id_invalid и любой иной error → skipped, без паузы
