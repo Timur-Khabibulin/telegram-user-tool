@@ -162,10 +162,10 @@ const stringSession = convertToGramjsSession(data)        // готово для
 | Компонент | Расположение | Роль |
 |---|---|---|
 | `Main` | `src/features/tg-agent-autoregistration/run.ts` (новый) | вся логика: R-8/R-10/R-11 на старте, цикл по аккаунтам, стейджинг, обе сессии, итоговый отчёт |
-| CLI-двойник | `src/scripts/tg-agent-autoregistration.ts` (новый) | тонкая обёртка над `run.ts`, по паттерну `core/+scripts/` остального репозитория |
+| CLI-двойник | `src/scripts/ops/tg-agent-autoregistration.ts` (новый) | тонкая обёртка над `run.ts`, по паттерну `core/+scripts/` остального репозитория |
 | OpenClaw-тул | `index.ts` (корень, +1 регистрация) | `execute()` делегирует в `run.ts` напрямую, без LLM-цикла |
 | `TData` | `src/core/tdata/` (новый) | `@mtcute/convert` (раздел 2.1) + методы аккаунта (раздел 2.3) + очистка предыдущего состояния (раздел 2.4) — этой логики сейчас нет нигде в `src/core/telegram/service.ts`, пишется с нуля |
-| Подбор прокси | `src/scripts/provision-proxy-for-new-agent.ts` (существующий, без изменений) | вызывается подпроцессом на каждую попытку (R-12) |
+| Подбор прокси | `src/scripts/ops/provision-proxy-for-new-agent.ts` (существующий, без изменений) | вызывается подпроцессом на каждую попытку (R-12) |
 | Стейджинг | `~/.openclaw/tg-agent-autoregistration/staging/agent<N>/` (R-7/R-D3) | `status.json` пишется через tmp-файл+`renameSync` (атомарно); на `done` — сначала полностью собирается (`tdata/`+`tg-account.json`+`SOUL.md`), затем один `renameSync(staging, workspace)` — атомарен на уровне ОС в пределах одной ФС |
 | Шаблоны персоны | `~/.openclaw/tg-agent-autoregistration/templates/<personName>/` (R-D1) | без изменений относительно требований |
 

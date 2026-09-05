@@ -1,12 +1,12 @@
-// scripts/discovery-add-pool.ts — разовое ручное добавление списка каналов в пул
+// scripts/ops/discovery-add-pool.ts — разовое ручное добавление списка каналов в пул
 // реестра discovery (assigned_agent = NULL), откуда их потом заберёт
 // distribute-pool.ts. Источник — файл с одной канонической ссылкой на строку.
 //
-// Запуск: tsx src/scripts/discovery-add-pool.ts --file <path> [--admin agent1]
+// Запуск: tsx src/scripts/ops/discovery-add-pool.ts --file <path> [--admin agent1]
 
 import * as fs from "fs";
-import { FUNNEL_ADMIN_AGENT_ID } from "../core/config";
-import { normalizeChannelLink, registerChannel } from "../core/db/discovery";
+import { FUNNEL_ADMIN_AGENT_ID } from "../../core/config";
+import { normalizeChannelLink, registerChannel } from "../../core/db/discovery";
 
 function parseArg(argv: string[], flag: string): string | undefined {
     const idx = argv.indexOf(flag);
@@ -22,7 +22,7 @@ function main(): void {
     const adminAgentId = parseArg(argv, "--admin") ?? FUNNEL_ADMIN_AGENT_ID;
 
     if (!filePath) {
-        console.error("usage: tsx src/scripts/discovery-add-pool.ts --file <path> [--admin agent1]");
+        console.error("usage: tsx src/scripts/ops/discovery-add-pool.ts --file <path> [--admin agent1]");
         process.exit(1);
     }
 

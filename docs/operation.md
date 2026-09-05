@@ -239,10 +239,10 @@ ssh -i ~/.ssh/vps_key root@<host> "chown -R root:root ~/.openclaw/extensions/tel
 
 ```bash
 # 1) Из очередей вступления всех агентов (ссылки берутся из join_queue):
-tsx src/scripts/discovery-backfill.ts --admin agent1
+tsx src/scripts/ops/discovery-backfill.ts --admin agent1
 
 # 2) Публичные каналы, вступлённые помимо очереди (вручную, по их ссылкам):
-tsx src/scripts/discovery-backfill.ts --manual "t.me/foo,t.me/bar" --manual-agent agent1
+tsx src/scripts/ops/discovery-backfill.ts --manual "t.me/foo,t.me/bar" --manual-agent agent1
 ```
 
 Каждый канал заносится с `assigned_agent` его текущего владельца. Повторный запуск

@@ -1,4 +1,4 @@
-// scripts/channel-niche.ts — ниша/тематика произвольного списка Telegram-каналов по CSV.
+// scripts/ops/channel-niche.ts — ниша/тематика произвольного списка Telegram-каналов по CSV.
 //
 // Ручной операторский инструмент (не dispatcher/systemd): читает CSV со списком
 // ссылок (колонка `link`), для каждой через MTProto резолвит канал, берёт
@@ -36,36 +36,36 @@
 // канала останавливает прогон, чтобы не крутиться вхолостую.
 //
 // Запуск (параллельно, 10 аккаунтов волной):
-//   tsx src/scripts/channel-niche.ts --input links.csv --output niches.csv \
+//   tsx src/scripts/ops/channel-niche.ts --input links.csv --output niches.csv \
 //     --agents agent1,agent2,...,agent10,agent11,...,agent20 --parallel 10
 // Запуск (один аккаунт, без параллельности — parallel по умолчанию 1 при одном agentId):
-//   tsx src/scripts/channel-niche.ts --input links.csv --output niches.csv --agent agent8
+//   tsx src/scripts/ops/channel-niche.ts --input links.csv --output niches.csv --agent agent8
 // Запуск до полного разбора списка (проходы повторяются автоматически):
-//   tsx src/scripts/channel-niche.ts --input links.csv --output niches.csv \
+//   tsx src/scripts/ops/channel-niche.ts --input links.csv --output niches.csv \
 //     --agents agent1,agent2 --parallel 2 --until-done
 // Родственный скрипт: channel-metrics.ts (подписчики/охват вместо ниши, без параллельности).
 
 import * as fs from "fs";
 import { z } from "zod";
 
-import type { Logger } from "../core/logger";
-import { TelegramService, ChannelPost } from "../core/telegram/service";
+import type { Logger } from "../../core/logger";
+import { TelegramService, ChannelPost } from "../../core/telegram/service";
 import {
     FloodWaitError,
     ClientNotConnectedError,
     SessionRevokedError,
     AccountBannedError,
-} from "../core/telegram/errors";
-import { acquireSession, releaseSession, SessionBusyError } from "../core/telegram/session-lock";
-import { normalizeChannelLink } from "../core/db/discovery";
+} from "../../core/telegram/errors";
+import { acquireSession, releaseSession, SessionBusyError } from "../../core/telegram/session-lock";
+import { normalizeChannelLink } from "../../core/db/discovery";
 import {
     V5_MSG_MARK_DELAY_MIN_SEC,
     V5_MSG_MARK_DELAY_MAX_SEC,
     V5_DELAY_EMPTY_MIN_SEC,
     V5_DELAY_EMPTY_MAX_SEC,
-} from "../core/config";
-import { createLlmClient } from "../llm/client";
-import { classifyNiche } from "../llm/prompts";
+} from "../../core/config";
+import { createLlmClient } from "../../llm/client";
+import { classifyNiche } from "../../llm/prompts";
 
 const log: Logger = {
     info: (m) => console.log(m),
@@ -485,7 +485,7 @@ async function main(): Promise<void> {
         !Number.isFinite(parallelism) || parallelism <= 0
     ) {
         log.error(
-            "usage: tsx src/scripts/channel-niche.ts --input <links.csv> --output <niches.csv> " +
+            "usage: tsx src/scripts/ops/channel-niche.ts --input <links.csv> --output <niches.csv> " +
             "--agents <agentId1,agentId2,...> [--batch-size 55] [--parallel 10] [--until-done]",
         );
         process.exit(1);

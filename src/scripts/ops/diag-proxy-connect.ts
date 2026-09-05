@@ -1,13 +1,13 @@
-// scripts/diag-proxy-connect.ts — разовая диагностика: почему процесс молча падает при
+// scripts/ops/diag-proxy-connect.ts — разовая диагностика: почему процесс молча падает при
 // подключении через dedicated-порт asocks. Ловит uncaughtException/unhandledRejection,
 // которые обычный try/catch в ensureClient не видит, если сокет-слой бросает необработанно.
 //
 // Запуск ТОЛЬКО на забаненном/ограниченном агенте (не трогает живые сессии):
-//   tsx src/scripts/diag-proxy-connect.ts --agent agent1799
+//   tsx src/scripts/ops/diag-proxy-connect.ts --agent agent1799
 
-import { TelegramService } from "../core/telegram/service";
-import { loadAccountConfig } from "../core/config";
-import { createMobileProxy, deleteProxyByName } from "../features/proxy/asocks-client";
+import { TelegramService } from "../../core/telegram/service";
+import { loadAccountConfig } from "../../core/config";
+import { createMobileProxy, deleteProxyByName } from "../../features/proxy/asocks-client";
 
 const t0 = Date.now();
 const ts = () => `+${((Date.now() - t0) / 1000).toFixed(1)}s`;

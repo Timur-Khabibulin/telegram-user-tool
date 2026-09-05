@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Обёртка для tg-channel-activity-update-manual@.service — разбирает instance
-# (agentId1-agentId2-...[.limitN]) в --agents/--limit для channel-activity-update.ts.
+# (agentId1-agentId2-...[.limitN]) в --agents/--limit для periodic/channel-activity-update.ts.
 #
 # Вынесена в отдельный файл, а не инлайн в ExecStart=, потому что systemd сам
 # пытается развернуть $-конструкции в строке ExecStart= (даже внутри
@@ -29,4 +29,4 @@ if [ -n "$LIMIT" ]; then
     ARGS+=(--limit "$LIMIT")
 fi
 
-exec node_modules/.bin/tsx src/scripts/channel-activity-update.ts "${ARGS[@]}"
+exec node_modules/.bin/tsx src/scripts/periodic/channel-activity-update.ts "${ARGS[@]}"

@@ -61,7 +61,7 @@ OpenClaw-инструмент `tg_daily_summary` (и скилл `skills/daily-su
 
 ### Requirement: Доставка дневной сводки получателю по расписанию
 
-Standalone-скрипт `src/scripts/daily-summary.ts --send-as <agentId>` SHALL построить
+Standalone-скрипт `src/scripts/periodic/daily-summary.ts --send-as <agentId>` SHALL построить
 сводку за завершившийся день UTC+5, загрузить указанный аккаунт через
 `TelegramService` и отправить текст сводки в его Saved Messages. Значение по
 умолчанию — `REPORT_AGENT_ID`; аргумент допускает явное переопределение. systemd-таймер

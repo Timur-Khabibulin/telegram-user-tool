@@ -1,11 +1,11 @@
-// scripts/tg-agent-autoregistration-retry-code.ts — ретрай второй сессии для
+// scripts/ops/tg-agent-autoregistration-retry-code.ts — ретрай второй сессии для
 // аккаунта в статусе needs_manual_code, без повторной подготовки аккаунта.
 //
 // Запуск: tsx tg-agent-autoregistration-retry-code.ts --agent-id agent220 \
 //           --person-name maria --proxy-region us --max-proxy-attempts 5
 
-import type { Logger } from "../core/logger";
-import { retryManualCode } from "../features/tg-agent-autoregistration/run";
+import type { Logger } from "../../core/logger";
+import { retryManualCode } from "../../features/tg-agent-autoregistration/run";
 
 const log: Logger = {
     info: (m) => console.error(m),

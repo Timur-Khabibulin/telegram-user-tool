@@ -1,4 +1,4 @@
-// scripts/provision-proxy-for-new-agent.ts — подбор рабочего, уникального между агентами
+// scripts/ops/provision-proxy-for-new-agent.ts — подбор рабочего, уникального между агентами
 // мобильного прокси ДО того, как у нового агента появится Telegram-сессия
 // (tg-agent-create-proxy-provisioning, mobile-proxy-unique-exit-ip).
 //
@@ -42,12 +42,12 @@
 //      прогоне кандидат передаётся через --exclude — на стороне asocks удалять нечего, это не
 //      наш созданный ресурс.
 
-import type { Logger } from "../core/logger";
-import { TelegramService } from "../core/telegram/service";
-import type { ProxyConfig } from "../core/config";
-import { listCountries } from "../features/proxy/asocks-client";
-import { fetchAvailableMobileProxies } from "../features/proxy/proxy-pool";
-import { ConnectTimeoutError } from "../core/telegram/errors";
+import type { Logger } from "../../core/logger";
+import { TelegramService } from "../../core/telegram/service";
+import type { ProxyConfig } from "../../core/config";
+import { listCountries } from "../../features/proxy/asocks-client";
+import { fetchAvailableMobileProxies } from "../../features/proxy/proxy-pool";
+import { ConnectTimeoutError } from "../../core/telegram/errors";
 
 const log: Logger = {
     info: (m) => console.error(m),

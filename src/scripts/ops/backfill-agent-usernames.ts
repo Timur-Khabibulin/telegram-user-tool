@@ -1,4 +1,4 @@
-// scripts/backfill-agent-usernames.ts — разовый бэкфилл AccountConfig.username для уже
+// scripts/ops/backfill-agent-usernames.ts — разовый бэкфилл AccountConfig.username для уже
 // существующих агентов (созданных до появления поля, или не через tg-agent-autoregistration).
 //
 // Источник истины — реальный Telegram-аккаунт (TelegramService.getSelfUsername, GetMe), не
@@ -18,9 +18,9 @@
 
 import * as fs from "fs";
 
-import type { Logger } from "../core/logger";
-import { TelegramService } from "../core/telegram/service";
-import { accountConfigPath, listAgentIds, loadAccountConfig } from "../core/config";
+import type { Logger } from "../../core/logger";
+import { TelegramService } from "../../core/telegram/service";
+import { accountConfigPath, listAgentIds, loadAccountConfig } from "../../core/config";
 
 const log: Logger = {
     info: (m) => console.log(m),

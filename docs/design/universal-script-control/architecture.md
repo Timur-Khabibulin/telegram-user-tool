@@ -89,7 +89,7 @@ standalone-скриптов (`dispatcher.ts`, `funnel-tracker.ts`).
 | Компонент | Расположение | Роль |
 |---|---|---|
 | Пульт скриптов | `src/core/script-control.ts` (новый) | тонкие обёртки `startScript` / `listRunningScripts` / `stopScript` над `systemd-run`/`systemctl` через `execFileAsync`. Аналог `scheduler-control.ts`, без зависимости от OpenClaw |
-| Точки входа скриптов | `src/scripts/discovery-similar.ts`, `channel-analysis.ts`, `channel-discovery.ts` (новые) | standalone-`main`: разбор argv → вызов core-`run*` → отчёт в Saved Messages → exit. Образец — `funnel-tracker.ts`/`dispatcher.ts` |
+| Точки входа скриптов | `src/scripts/ops/discovery-similar.ts`, `channel-analysis.ts`, `channel-discovery.ts` (новые) | standalone-`main`: разбор argv → вызов core-`run*` → отчёт в Saved Messages → exit. Образец — `funnel-tracker.ts`/`dispatcher.ts` |
 | Общий рендер отчёта/ошибки | `src/core/script-report.ts` (новый, вынести из `dispatcher.ts`) | единый формат `formatReport`/`extractError` для диспетчера и операторских скриптов (AC-7/8 «в том же формате») |
 | Кооперативная отмена | сигнатуры core-`run*` (`similar.ts` и др.) | приём токена отмены, проверка в точках цикла и в паузах `pacingMs` (AC-6) |
 | Инструменты гейтвея | `index.ts` | существующие `tg_discovery_similar_run` / `tg_channel_content_analysis` / `tg_discovery_run` становятся **тонкими лаунчерами** (вызывают `startScript`, сразу возвращают id). Добавляются `tg_scripts_running` (AC-4) и `tg_script_stop` (AC-5) |
@@ -295,7 +295,7 @@ systemctl show <unit> -p ExecMainStartTimestamp --value
 
 - **Новых unit-файлов для скриптов не требуется** — юниты транзиентные, их создаёт
   `systemd-run` в рантайме. `deploy/systemd/` не пополняется.
-- Новые точки входа (`src/scripts/discovery-similar.ts`, `channel-analysis.ts`,
+- Новые точки входа (`src/scripts/ops/discovery-similar.ts`, `channel-analysis.ts`,
   `channel-discovery.ts`) и `src/core/script-control.ts` едут на сервер вместе с `src/`
   обычным деплоем (`scp`/skill `vps`) — `daemon-reload` не нужен (юнитов не меняем).
 - Переиспользуются: `tg-agents.slice` (ресурсные лимиты через `--slice=`),
@@ -335,7 +335,7 @@ systemctl show <unit> -p ExecMainStartTimestamp --value
 4. **Инкрементальная сохранность discovery-similar.** Свернуть `collectByLevels` +
    `distribute` в одну фазу с durable-записью на каждой находке (§5.2); удалить
    in-memory-пул как носитель результата.
-5. **Точки входа скриптов.** `src/scripts/discovery-similar.ts`, `channel-analysis.ts`,
+5. **Точки входа скриптов.** `src/scripts/ops/discovery-similar.ts`, `channel-analysis.ts`,
    `channel-discovery.ts`: разбор argv, обработчик SIGTERM → отмена, вызов core-`run*`,
    отчёт в Saved Messages, error-отчёт в `catch`, корректный exit.
 6. **Тонкие лаунчеры в гейтвее.** Переключить `tg_discovery_similar_run`,

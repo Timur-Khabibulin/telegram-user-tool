@@ -4,7 +4,7 @@ description: Bulk-import a curated CSV (agentId;link;pool_name) into discovery.d
 ---
 
 Заливает готовый CSV (`agentId;link;pool_name`) на VPS и прогоняет
-`src/scripts/import-agent-pool.ts` — прямое назначение канал→агент (без
+`src/scripts/ops/import-agent-pool.ts` — прямое назначение канал→агент (без
 round-robin) плюс закрепление имени пула за агентом. См. `openspec/specs/channel-pools/`
 (история и правила) и skill `vps` (тот же `ssh -i ~/.ssh/vps_key root@<VPS_HOST>`).
 
@@ -45,7 +45,7 @@ agent2;t.me/somechannel;
 2. Прогнать импорт:
    ```
    ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/.openclaw/extensions/telegram-user-tool && \
-     ./node_modules/.bin/tsx src/scripts/import-agent-pool.ts --file imports/<имя>.csv [--admin agent1]"
+     ./node_modules/.bin/tsx src/scripts/ops/import-agent-pool.ts --file imports/<имя>.csv [--admin agent1]"
    ```
 
 3. Убрать временный файл после успешного прогона (не оставлять CSV в `imports/` навсегда):

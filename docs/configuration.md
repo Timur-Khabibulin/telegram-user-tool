@@ -84,7 +84,7 @@
 
 | Переменная | Назначение | Читается в |
 |---|---|---|
-| `ASOCKS_API_KEY` | доступ к asocks.com для подбора/провижининга мобильных прокси | `src/scripts/provision-proxy-for-new-agent.ts`, `src/scripts/provision-mobile-proxy.ts` |
+| `ASOCKS_API_KEY` | доступ к asocks.com для подбора/провижининга мобильных прокси | `src/scripts/ops/provision-proxy-for-new-agent.ts`, `src/scripts/ops/provision-mobile-proxy.ts` |
 | `TELEGRAM_REVIEW_BOT_TOKEN` | токен общего Bot API-бота ручного ревью (post-comment-review) — один на платформу, не per-agent | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
 | `TELEGRAM_REVIEW_CHAT_ID` | id чата ревьюеров, куда бот шлёт запросы на подтверждение | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
 
@@ -120,7 +120,7 @@ user-unit `root`-а — `~/.config/systemd/user/openclaw-gateway.service` (эт�
   `openclaw.json` → `plugins.entries.telegram-user-tool.config.tgstatToken`.
   Это изолирует секрет в конфиге плагина, не в глобальном env OpenClaw. Fallback —
   env `TGSTAT_TOKEN` (для совместимости). После правки конфига — `systemctl restart openclaw`.
-- **Скрипт `src/scripts/discovery.ts`** (вне gateway) — из env `TGSTAT_TOKEN`
+- **Скрипт `src/scripts/ops/discovery.ts`** (вне gateway) — из env `TGSTAT_TOKEN`
   (`config.ts` → `TGSTAT_API_TOKEN`), инлайн: `TGSTAT_TOKEN=… npx tsx …`. Заглушка
   `STUB_TGSTAT_TOKEN` отклоняется на старте.
 

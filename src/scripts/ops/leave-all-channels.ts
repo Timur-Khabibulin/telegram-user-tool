@@ -1,4 +1,4 @@
-// scripts/leave-all-channels.ts — разовый массовый выход всех агентов из всех
+// scripts/ops/leave-all-channels.ts — разовый массовый выход всех агентов из всех
 // каналов/супергрупп (leaveChannelByHandle, не требует peerCache/get_dialogs).
 //
 // Пауза между выходами внутри одного агента (как account-warmup.ts) + повтор
@@ -9,16 +9,16 @@
 // Локальные БД (channels/replies/dm-threads) не трогаем — join-queue уже
 // отключена отдельно (scheduler-control), очередь/история остаются как есть.
 //
-// Запуск: tsx src/scripts/leave-all-channels.ts [--agent <agentId>]
+// Запуск: tsx src/scripts/ops/leave-all-channels.ts [--agent <agentId>]
 //   [--delay-min-seconds 5] [--delay-max-seconds 10] [--concurrency 15]
 
-import type { Logger } from "../core/logger";
-import { formatError } from "../core/errors";
-import { TelegramService } from "../core/telegram/service";
-import { ClientNotConnectedError, SessionRevokedError, AccountBannedError } from "../core/telegram/errors";
-import { listAgentIds, REPORT_AGENT_ID } from "../core/config";
-import { withTimeout } from "../features/funnel/funnel-collect";
-import { sleep, randomDelayMs, FloodAbortError, withFloodRetry } from "../skills/util";
+import type { Logger } from "../../core/logger";
+import { formatError } from "../../core/errors";
+import { TelegramService } from "../../core/telegram/service";
+import { ClientNotConnectedError, SessionRevokedError, AccountBannedError } from "../../core/telegram/errors";
+import { listAgentIds, REPORT_AGENT_ID } from "../../core/config";
+import { withTimeout } from "../../features/funnel/funnel-collect";
+import { sleep, randomDelayMs, FloodAbortError, withFloodRetry } from "../../skills/util";
 
 // "Немой" зависший прокси не рвёт соединение ошибкой и не подчиняется таймауту
 // ensureClient (тот бьётся только за сам connect) — MTProto-вызов после коннекта

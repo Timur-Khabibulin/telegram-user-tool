@@ -1,5 +1,5 @@
-// scripts/funnel-tracker.ts — дневной сбор метрик воронки по всем агентам
-// (funnel-tracking). Зеркало src/scripts/daily-summary.ts.
+// scripts/periodic/funnel-tracker.ts — дневной сбор метрик воронки по всем агентам
+// (funnel-tracking). Зеркало src/scripts/periodic/daily-summary.ts.
 //
 // Oneshot, запускается systemd-таймером раз в день на границе дня UTC+5
 // (19:00 UTC). Собирает завершившийся день (persist=true: пишет снапшоты и
@@ -12,13 +12,13 @@
 import * as fs from "fs";
 import * as path from "path";
 
-import type { Logger } from "../core/logger";
-import { TelegramService } from "../core/telegram/service";
-import { finishedDayWindow } from "../features/funnel/runs-summary";
-import { FUNNEL_ADMIN_AGENT_ID, FUNNEL_PRIVATE_CHANNEL_ID, REPORT_AGENT_ID } from "../core/config";
-import { ensureFunnelSchema } from "../core/db/funnel";
-import { collectFunnel, withTimeout } from "../features/funnel/funnel-collect";
-import { renderFunnel, buildFunnelCsv, funnelCsvPath } from "../features/funnel/funnel-report";
+import type { Logger } from "../../core/logger";
+import { TelegramService } from "../../core/telegram/service";
+import { finishedDayWindow } from "../../features/funnel/runs-summary";
+import { FUNNEL_ADMIN_AGENT_ID, FUNNEL_PRIVATE_CHANNEL_ID, REPORT_AGENT_ID } from "../../core/config";
+import { ensureFunnelSchema } from "../../core/db/funnel";
+import { collectFunnel, withTimeout } from "../../features/funnel/funnel-collect";
+import { renderFunnel, buildFunnelCsv, funnelCsvPath } from "../../features/funnel/funnel-report";
 
 const log: Logger = {
     info: (m) => console.log(m),

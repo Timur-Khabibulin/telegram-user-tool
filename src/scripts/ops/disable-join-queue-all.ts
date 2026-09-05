@@ -1,4 +1,4 @@
-// scripts/disable-join-queue-all.ts — разовый скрипт: выключает задачу
+// scripts/ops/disable-join-queue-all.ts — разовый скрипт: выключает задачу
 // join-queue у всех агентов платформы.
 //
 // removeTask (не прямой disableTask) — если join-queue была единственной
@@ -6,11 +6,11 @@
 // scheduler-control.ts), а не только саму задачу. Идемпотентно: агент без
 // join-queue или уже выключенной — no-op.
 //
-// Запуск: tsx src/scripts/disable-join-queue-all.ts
+// Запуск: tsx src/scripts/ops/disable-join-queue-all.ts
 
-import type { Logger } from "../core/logger";
-import { listAgentIds } from "../core/config";
-import { removeTask } from "../core/scheduler-control";
+import type { Logger } from "../../core/logger";
+import { listAgentIds } from "../../core/config";
+import { removeTask } from "../../core/scheduler-control";
 
 const log: Logger = {
     info: (m) => console.log(m),

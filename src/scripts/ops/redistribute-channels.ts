@@ -1,4 +1,4 @@
-// scripts/redistribute-channels.ts — принудительное перераспределение уже известных
+// scripts/ops/redistribute-channels.ts — принудительное перераспределение уже известных
 // каналов на новых агентов по готовому CSV (agent-pool-redistribution).
 //
 // Отличие от import-agent-pool.ts/distribute-channels.ts: те защищают уже активные
@@ -10,13 +10,13 @@
 // Формат входного CSV: channel_link,assigned_agent,pool,subs_count,avg_views
 // (заголовок обязателен, разделитель — запятая; лишние колонки не парсятся).
 //
-// Запуск: tsx src/scripts/redistribute-channels.ts --file <path> [--admin agent1]
+// Запуск: tsx src/scripts/ops/redistribute-channels.ts --file <path> [--admin agent1]
 
 import * as fs from "fs";
-import { listAgentIds, FUNNEL_ADMIN_AGENT_ID } from "../core/config";
-import { normalizeChannelLink, forceAssignChannel, setAgentPool } from "../core/db/discovery";
-import { addJoinQueue } from "../core/db/join-queue";
-import type { Logger } from "../core/logger";
+import { listAgentIds, FUNNEL_ADMIN_AGENT_ID } from "../../core/config";
+import { normalizeChannelLink, forceAssignChannel, setAgentPool } from "../../core/db/discovery";
+import { addJoinQueue } from "../../core/db/join-queue";
+import type { Logger } from "../../core/logger";
 
 const log: Logger = {
     info: (m) => console.log(m),
@@ -56,7 +56,7 @@ function main(): void {
     const adminAgentId = parseArg(argv, "--admin") ?? FUNNEL_ADMIN_AGENT_ID;
 
     if (!filePath) {
-        log.error("usage: tsx src/scripts/redistribute-channels.ts --file <path> [--admin agent1]");
+        log.error("usage: tsx src/scripts/ops/redistribute-channels.ts --file <path> [--admin agent1]");
         process.exit(1);
     }
 

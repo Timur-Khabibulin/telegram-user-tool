@@ -1,14 +1,14 @@
-// scripts/enable-monitor-v5-for-agents.ts — разовый скрипт: включает задачу
+// scripts/ops/enable-monitor-v5-for-agents.ts — разовый скрипт: включает задачу
 // monitor-v5 для явно перечисленных агентов (тот же приём, что
 // activate-leave-banned-for-agents.ts) — createOrUpdateTask вместо upsertTask
 // напрямую, чтобы получить round-robin фазу через computeDefaultSchedule и,
 // при необходимости, поднять heartbeat-таймер (у этих агентов таймер уже
 // работает — join-queue/leave-banned включены, systemctl не понадобится).
 //
-// Запуск: tsx src/scripts/enable-monitor-v5-for-agents.ts
+// Запуск: tsx src/scripts/ops/enable-monitor-v5-for-agents.ts
 
-import type { Logger } from "../core/logger";
-import { createOrUpdateTask } from "../core/scheduler-control";
+import type { Logger } from "../../core/logger";
+import { createOrUpdateTask } from "../../core/scheduler-control";
 
 const log: Logger = {
     info: (m) => console.log(m),

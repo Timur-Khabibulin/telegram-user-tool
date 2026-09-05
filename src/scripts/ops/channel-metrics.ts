@@ -1,4 +1,4 @@
-// scripts/channel-metrics.ts — CLI-вход для features/channel-metrics/run.ts.
+// scripts/ops/channel-metrics.ts — CLI-вход для features/channel-metrics/run.ts.
 //
 // Ручной операторский инструмент (не dispatcher/systemd): читает CSV со списком
 // ссылок (колонка `link`), для каждой через MTProto одной сессии агента считает
@@ -14,14 +14,14 @@
 // Второй вход в ту же логику — инструмент tg_channel_metrics (index.ts), для
 // вызова из OpenClaw без файлов на диске у оператора.
 //
-// Запуск: tsx src/scripts/channel-metrics.ts --input links.csv --output metrics.csv --agent agent8 [--with-niche]
+// Запуск: tsx src/scripts/ops/channel-metrics.ts --input links.csv --output metrics.csv --agent agent8 [--with-niche]
 // Spec: openspec/changes/channel-metrics/.
 
 import * as fs from "fs";
 
-import type { Logger } from "../core/logger";
-import { runChannelMetrics, readCsvRows } from "../features/channel-metrics/run";
-import { createLlmClient } from "../llm/client";
+import type { Logger } from "../../core/logger";
+import { runChannelMetrics, readCsvRows } from "../../features/channel-metrics/run";
+import { createLlmClient } from "../../llm/client";
 
 const log: Logger = {
     info: (m) => console.log(m),
@@ -57,7 +57,7 @@ async function main(): Promise<void> {
     const withNiche = argv.includes("--with-niche");
 
     if (!inputPath || !outputPath || !agentId) {
-        log.error("usage: tsx src/scripts/channel-metrics.ts --input <links.csv> --output <metrics.csv> --agent <agentId> [--with-niche]");
+        log.error("usage: tsx src/scripts/ops/channel-metrics.ts --input <links.csv> --output <metrics.csv> --agent <agentId> [--with-niche]");
         process.exit(1);
     }
 

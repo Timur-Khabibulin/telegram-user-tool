@@ -202,7 +202,7 @@ export function agentRestrictionsDbPath(adminAgentId: string): string {
 // ─── Конфигурация discovery (channel-discovery) ───────────────────────
 
 /**
- * Токен TGStat API для standalone-скрипта (`src/scripts/discovery.ts`): из env
+ * Токен TGStat API для standalone-скрипта (`src/scripts/ops/discovery.ts`): из env
  * `TGSTAT_TOKEN`, иначе плейсхолдер. Скилл (`tg_discovery_run`) токен сюда НЕ берёт —
  * он читает его из конфига плагина (`api.pluginConfig.tgstatToken`), см. index.ts и
  * docs/configuration.md. Ядро токен в env не читает — он приходит параметром.

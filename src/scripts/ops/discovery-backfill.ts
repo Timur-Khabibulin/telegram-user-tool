@@ -1,4 +1,4 @@
-// scripts/discovery-backfill.ts — разовый ручной backfill реестра discovery.
+// scripts/ops/discovery-backfill.ts — разовый ручной backfill реестра discovery.
 //
 // Заносит в реестр уже известные каналы, чтобы discovery не назначил уже
 // вступлённый канал другому агенту (иначе пересечение). Источник ссылок —
@@ -13,10 +13,10 @@
 //
 // Design: docs/design/channel-discovery/channel-discovery-v1.md §5.3.
 
-import type { Logger } from "../core/logger";
-import { FUNNEL_ADMIN_AGENT_ID, listAgentIds } from "../core/config";
-import { normalizeChannelLink, registerChannel } from "../core/db/discovery";
-import { getJoinedLinks } from "../core/db/join-queue";
+import type { Logger } from "../../core/logger";
+import { FUNNEL_ADMIN_AGENT_ID, listAgentIds } from "../../core/config";
+import { normalizeChannelLink, registerChannel } from "../../core/db/discovery";
+import { getJoinedLinks } from "../../core/db/join-queue";
 
 const log: Logger = {
     info: (m) => console.log(m),

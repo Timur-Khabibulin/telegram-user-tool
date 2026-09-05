@@ -3,7 +3,7 @@
 //
 // Чистая функция без побочных эффектов: вход — список {fromId, date} сообщений
 // чата, выход — перцентили. Источник сообщений (MTProto) и сохранение
-// результата — забота вызывающего (src/scripts/channel-activity-update.ts).
+// результата — забота вызывающего (src/scripts/periodic/channel-activity-update.ts).
 //
 // Окно — 7 дней; TTL пересчёта (activity_updated_at) при этом остаётся 30 дней
 // (ACTIVITY_CACHE_TTL_SECONDS в channel-activity-update.ts), как у avg_views/

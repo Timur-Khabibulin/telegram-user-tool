@@ -92,7 +92,7 @@ LLM); MTProto-вызовы инкапсулированы в `TelegramService` (
 Реестр найденных каналов и закрепление за агентом — `src/core/db/discovery.ts`
 (`normalizeChannelLink`, `isKnownChannel`, `registerChannel`); постановка в очередь
 вступления — `src/core/db/join-queue.ts` (`addJoinQueue`). Точка запуска — скрипт
-`src/scripts/discovery-similar.ts`, обёрнутый скиллом `skills/discovery-similar/`.
+`src/scripts/ops/discovery-similar.ts`, обёрнутый скиллом `skills/discovery-similar/`.
 
 **Последовательный обход.** Агенты обрабатываются строго по одному, каждый на своей
 сессии (`loadAccount` → обход → `disconnect`). Параллельного обхода нет: за счёт

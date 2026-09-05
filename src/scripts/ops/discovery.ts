@@ -1,4 +1,4 @@
-// scripts/discovery.ts — запуск прогона channel-discovery вручную / из таймера.
+// scripts/ops/discovery.ts — запуск прогона channel-discovery вручную / из таймера.
 //
 // Тонкая обёртка над features/discovery/run: парсит аргументы, запускает прогон,
 // печатает отчёт. Та же логика доступна интерактивно тулом discovery_run.
@@ -7,10 +7,10 @@
 // Запуск: tsx discovery.ts --keywords "психология,терапия" --n 200 \
 //           --min-subs 1000 [--min-avg-reach 500] [--admin agent1] [--agents a,b]
 
-import type { Logger } from "../core/logger";
-import { FUNNEL_ADMIN_AGENT_ID, listAgentIds, TGSTAT_API_TOKEN } from "../core/config";
-import { runDiscovery, renderReport } from "../features/discovery/run";
-import { TelegramService } from "../core/telegram/service";
+import type { Logger } from "../../core/logger";
+import { FUNNEL_ADMIN_AGENT_ID, listAgentIds, TGSTAT_API_TOKEN } from "../../core/config";
+import { runDiscovery, renderReport } from "../../features/discovery/run";
+import { TelegramService } from "../../core/telegram/service";
 
 const log: Logger = {
     info: (m) => console.log(m),

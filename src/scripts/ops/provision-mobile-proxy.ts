@@ -1,4 +1,4 @@
-// scripts/provision-mobile-proxy.ts — автоматический подбор рабочего, уникального между
+// scripts/ops/provision-mobile-proxy.ts — автоматический подбор рабочего, уникального между
 // агентами мобильного прокси (mobile-proxy-unique-exit-ip) для списка агентов.
 //
 // Разовый интерактивный запуск (не systemd-таймер) — вызывается Claude-skill'ом
@@ -24,12 +24,12 @@
 
 import * as fs from "fs";
 
-import type { Logger } from "../core/logger";
-import { TelegramService } from "../core/telegram/service";
-import { accountConfigPath, loadAccountConfig, type ProxyConfig } from "../core/config";
-import { fetchAvailableMobileProxies, createProxyPicker } from "../features/proxy/proxy-pool";
-import type { MobileProxyCandidate } from "../features/proxy/asocks-client";
-import { ConnectTimeoutError } from "../core/telegram/errors";
+import type { Logger } from "../../core/logger";
+import { TelegramService } from "../../core/telegram/service";
+import { accountConfigPath, loadAccountConfig, type ProxyConfig } from "../../core/config";
+import { fetchAvailableMobileProxies, createProxyPicker } from "../../features/proxy/proxy-pool";
+import type { MobileProxyCandidate } from "../../features/proxy/asocks-client";
+import { ConnectTimeoutError } from "../../core/telegram/errors";
 
 const log: Logger = {
     info: (m) => console.log(m),

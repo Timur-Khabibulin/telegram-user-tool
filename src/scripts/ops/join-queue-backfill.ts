@@ -1,4 +1,4 @@
-// scripts/join-queue-backfill.ts — разовый ручной бэкфилл join_queue после деплоя
+// scripts/ops/join-queue-backfill.ts — разовый ручной бэкфилл join_queue после деплоя
 // flood-wait-detection.
 //
 // Сбрасывает status='skipped' → 'pending' (attempts=0) по всем агентам — накопленные
@@ -16,11 +16,11 @@
 // всплеск ResolveUsername/GetFullChannel-вызовов у каждого агента способен
 // спровоцировать новые флуд-ограничения (design.md, Decisions).
 //
-// Запуск: tsx src/scripts/join-queue-backfill.ts [--batch-size 10] [--delay-seconds 300]
+// Запуск: tsx src/scripts/ops/join-queue-backfill.ts [--batch-size 10] [--delay-seconds 300]
 
-import type { Logger } from "../core/logger";
-import { listAgentIds } from "../core/config";
-import { resetSkippedToPending, joinQueueStats } from "../core/db/join-queue";
+import type { Logger } from "../../core/logger";
+import { listAgentIds } from "../../core/config";
+import { resetSkippedToPending, joinQueueStats } from "../../core/db/join-queue";
 
 const log: Logger = {
     info: (m) => console.log(m),
@@ -50,7 +50,7 @@ async function main(): Promise<void> {
     const delaySeconds = Number(parseArg(argv, "--delay-seconds") ?? 300);
 
     if (!Number.isFinite(batchSize) || batchSize <= 0 || !Number.isFinite(delaySeconds) || delaySeconds < 0) {
-        log.error("usage: tsx src/scripts/join-queue-backfill.ts [--batch-size 10] [--delay-seconds 300]");
+        log.error("usage: tsx src/scripts/ops/join-queue-backfill.ts [--batch-size 10] [--delay-seconds 300]");
         process.exit(1);
     }
 

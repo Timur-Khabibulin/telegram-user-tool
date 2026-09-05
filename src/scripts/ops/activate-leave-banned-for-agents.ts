@@ -1,4 +1,4 @@
-// scripts/activate-leave-banned-for-agents.ts — разовый скрипт (leave-banned-human-pacing):
+// scripts/ops/activate-leave-banned-for-agents.ts — разовый скрипт (leave-banned-human-pacing):
 // создаёт/включает задачу leave-banned для явно перечисленных агентов.
 //
 // Не backfill существующих строк (см. backfill-schedule-defaults.ts) — эти
@@ -6,10 +6,10 @@
 // (не upsertTask напрямую), чтобы получить round-robin фазу через
 // computeDefaultSchedule и, при необходимости, поднять heartbeat-таймер.
 //
-// Запуск: tsx src/scripts/activate-leave-banned-for-agents.ts
+// Запуск: tsx src/scripts/ops/activate-leave-banned-for-agents.ts
 
-import type { Logger } from "../core/logger";
-import { createOrUpdateTask } from "../core/scheduler-control";
+import type { Logger } from "../../core/logger";
+import { createOrUpdateTask } from "../../core/scheduler-control";
 
 const log: Logger = {
     info: (m) => console.log(m),

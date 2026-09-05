@@ -1,4 +1,4 @@
-// scripts/review-listener.ts — персистентный слушатель ревью-гейта
+// scripts/periodic/review-listener.ts — персистентный слушатель ревью-гейта
 // (post-comment-review). Один процесс на всю платформу — единственный
 // потребитель getUpdates общего Bot API-бота (design.md решение 2), не по
 // таймеру, запускается как persistent systemd-сервис (Restart=always).
@@ -13,19 +13,19 @@
 // после рестарта процесса (offset не персистится между рестартами, это
 // осознанно допустимый компромисс — см. design.md, Non-Goals).
 
-import type { Logger } from "../core/logger";
-import { TelegramService } from "../core/telegram/service";
-import { ClientNotConnectedError } from "../core/telegram/errors";
-import { withFloodRetry, FloodAbortError } from "../skills/util";
-import { getPendingReview, resolvePendingReview, type PendingReviewRow } from "../core/db/pending-reviews";
-import { markPostSeen, getChatAccessHash, getChatTitlesAndUsernames } from "../core/db/channels";
-import { applyApprovedComment, handlePostCommentSendError } from "../core/post-comment-send";
+import type { Logger } from "../../core/logger";
+import { TelegramService } from "../../core/telegram/service";
+import { ClientNotConnectedError } from "../../core/telegram/errors";
+import { withFloodRetry, FloodAbortError } from "../../skills/util";
+import { getPendingReview, resolvePendingReview, type PendingReviewRow } from "../../core/db/pending-reviews";
+import { markPostSeen, getChatAccessHash, getChatTitlesAndUsernames } from "../../core/db/channels";
+import { applyApprovedComment, handlePostCommentSendError } from "../../core/post-comment-send";
 import {
     getReviewCallbackUpdates,
     editReviewMessageOutcome,
     answerCallbackQuery,
     type ReviewCallback,
-} from "../core/review-bot-api";
+} from "../../core/review-bot-api";
 
 const log: Logger = {
     info: (m) => console.log(m),

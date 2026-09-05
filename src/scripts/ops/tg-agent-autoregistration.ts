@@ -1,4 +1,4 @@
-// scripts/tg-agent-autoregistration.ts — запуск tg-agent-autoregistration вручную / из скилла.
+// scripts/ops/tg-agent-autoregistration.ts — запуск tg-agent-autoregistration вручную / из скилла.
 //
 // Тонкая обёртка над features/tg-agent-autoregistration/run — парсит аргументы, запускает
 // прогон, печатает отчёт. Та же логика доступна интерактивно тулом
@@ -7,8 +7,8 @@
 // Запуск: tsx tg-agent-autoregistration.ts --mega-links "https://mega.nz/...,https://mega.nz/..." \
 //           --start-agent-number 40 --proxy-region us --max-proxy-attempts 5 --person-name maria
 
-import type { Logger } from "../core/logger";
-import { runAutoregistration, renderReport } from "../features/tg-agent-autoregistration/run";
+import type { Logger } from "../../core/logger";
+import { runAutoregistration, renderReport } from "../../features/tg-agent-autoregistration/run";
 
 const log: Logger = {
     info: (m) => console.error(m),

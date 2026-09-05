@@ -1,14 +1,14 @@
-// scripts/distribute-pool.ts — ручное распределение нераспределённых каналов из discovery.db.
+// scripts/ops/distribute-pool.ts — ручное распределение нераспределённых каналов из discovery.db.
 //
 // Читает каналы с assigned_agent IS NULL (пул незавершённого прогона discovery-similar)
 // и раскладывает их round-robin по агентам платформы (до target каждому).
 //
-// Запуск: tsx src/scripts/distribute-pool.ts --target <n> [--admin agent1] [--exclude agent6,agent13]
+// Запуск: tsx src/scripts/ops/distribute-pool.ts --target <n> [--admin agent1] [--exclude agent6,agent13]
 
-import type { Logger } from "../core/logger";
-import { FUNNEL_ADMIN_AGENT_ID, listAgentIds } from "../core/config";
-import { getUnassignedChannels, assignChannel } from "../core/db/discovery";
-import { addJoinQueue } from "../core/db/join-queue";
+import type { Logger } from "../../core/logger";
+import { FUNNEL_ADMIN_AGENT_ID, listAgentIds } from "../../core/config";
+import { getUnassignedChannels, assignChannel } from "../../core/db/discovery";
+import { addJoinQueue } from "../../core/db/join-queue";
 
 const log: Logger = {
     info: (m) => console.log(m),
@@ -30,7 +30,7 @@ function main(): void {
     const target = Number(parseArg(argv, "--target"));
 
     if (!Number.isFinite(target) || target <= 0) {
-        log.error("usage: tsx src/scripts/distribute-pool.ts --target <n> [--admin agent1]");
+        log.error("usage: tsx src/scripts/ops/distribute-pool.ts --target <n> [--admin agent1]");
         process.exit(1);
     }
 

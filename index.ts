@@ -1005,7 +1005,7 @@ export default definePluginEntry({
         // подписчики, средний охват последних постов, открыты ли комментарии,
         // broadcast ли канал. С withNiche — плюс ниша/тематика одним LLM-вызовом
         // на канал (переиспользует уже полученные title/about/посты). Та же
-        // логика, что у CLI tsx src/scripts/channel-metrics.ts.
+        // логика, что у CLI tsx src/scripts/ops/channel-metrics.ts.
         reg({
             name: "tg_channel_metrics",
             description:

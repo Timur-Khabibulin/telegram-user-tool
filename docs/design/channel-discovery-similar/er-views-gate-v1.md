@@ -142,7 +142,7 @@ Feature: Гейт кандидатов по ER и avg views
 **Файлы:**
 - `src/features/discovery/similar.ts` — основная логика (`collectByLevels`,
   `gatherAndScoreSeeds`, `SimilarParams`, `SkipCounts`)
-- `src/scripts/discovery-similar.ts` — CLI-параметры (`--min-er`,
+- `src/scripts/ops/discovery-similar.ts` — CLI-параметры (`--min-er`,
   `--min-avg-views`), валидация по аналогии с `--theme`/`--agents` (строки 56-71)
 - `skills/discovery-similar/SKILL.md` — описание шагов (требует обновления
   финальными решениями)

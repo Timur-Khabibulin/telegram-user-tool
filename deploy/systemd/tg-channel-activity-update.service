@@ -12,7 +12,7 @@ After=network.target
 Type=oneshot
 User=root
 WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
-ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/channel-activity-update.ts
+ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/channel-activity-update.ts
 EnvironmentFile=-/root/.openclaw/codex-auth/.env
 EnvironmentFile=-/root/.openclaw/secrets.env
 # Свой slice (не tg-agents.slice) — изолирует память этого джоба от бюджета

@@ -1,4 +1,4 @@
-// scripts/discovery-similar.ts — запуск обхода похожих каналов вручную.
+// scripts/ops/discovery-similar.ts — запуск обхода похожих каналов вручную.
 //
 // Тонкая обёртка над features/discovery/similar: парсит аргументы, запускает прогон
 // последовательно по агентам (каждый на своей сессии), печатает отчёт. Вступление
@@ -15,10 +15,10 @@ const DEFAULT_MIN_TOPIC_SCORE = 0.5;
 const DEFAULT_POSTS_COUNT = 20;
 const DEFAULT_MIN_ENGAGEMENT_RATE = 0.1;
 
-import type { Logger } from "../core/logger";
-import { FUNNEL_ADMIN_AGENT_ID, listAgentIds } from "../core/config";
-import { runSimilarDiscovery, renderSimilarReport } from "../features/discovery/similar";
-import { createLlmClient } from "../llm/client";
+import type { Logger } from "../../core/logger";
+import { FUNNEL_ADMIN_AGENT_ID, listAgentIds } from "../../core/config";
+import { runSimilarDiscovery, renderSimilarReport } from "../../features/discovery/similar";
+import { createLlmClient } from "../../llm/client";
 
 const log: Logger = {
     info: (m) => console.log(m),

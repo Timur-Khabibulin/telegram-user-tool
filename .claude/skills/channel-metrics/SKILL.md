@@ -4,7 +4,7 @@ description: Compute Telegram channel metrics (subscriber count, average post re
 ---
 
 Заливает CSV со списком ссылок на VPS и прогоняет
-`src/scripts/channel-metrics.ts` — для каждой ссылки через MTProto одной сессии
+`src/scripts/ops/channel-metrics.ts` — для каждой ссылки через MTProto одной сессии
 агента считает подписчиков, средний охват поста, открыты ли комментарии
 (привязана ли группа обсуждения) и является ли канал broadcast-каналом.
 Результат пишется в CSV на сервере построчно и резюмируемо. См.
@@ -44,7 +44,7 @@ https://t.me/bar,Канал Bar,agent8
    держать интерактивную SSH-сессию:
    ```
    ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/.openclaw/extensions/telegram-user-tool && \
-     nohup ./node_modules/.bin/tsx src/scripts/channel-metrics.ts \
+     nohup ./node_modules/.bin/tsx src/scripts/ops/channel-metrics.ts \
        --input imports/<имя>-input.csv \
        --output imports/<имя>-output.csv \
        --agent <agentId> > imports/<имя>.log 2>&1 & disown"

@@ -37,7 +37,7 @@ exit-ip/design.md`).
 
 ```
 ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/.openclaw/extensions/telegram-user-tool && \
-  ./node_modules/.bin/tsx src/scripts/provision-mobile-proxy.ts \
+  ./node_modules/.bin/tsx src/scripts/ops/provision-mobile-proxy.ts \
   --agents <agentId1,agentId2,...> \
   [--country <country>] \
   --max-attempts <N>"

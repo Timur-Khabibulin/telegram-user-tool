@@ -1,4 +1,4 @@
-// scripts/daily-summary.ts — дневная сводка прогонов по всем агентам в Saved
+// scripts/periodic/daily-summary.ts — дневная сводка прогонов по всем агентам в Saved
 // Messages получателя отчётов (run-status-tracking §5).
 //
 // Запускается systemd-таймером раз в день на границе дня UTC+5 (19:00 UTC) и
@@ -6,10 +6,10 @@
 // только разбор --send-as, загрузка аккаунта-получателя и отправка текста.
 // Запуск: `tsx daily-summary.ts --send-as <agentId>` (по умолчанию REPORT_AGENT_ID).
 
-import type { Logger } from "../core/logger";
-import { TelegramService } from "../core/telegram/service";
-import { buildDailySummary, finishedDayWindow } from "../features/funnel/runs-summary";
-import { REPORT_AGENT_ID } from "../core/config";
+import type { Logger } from "../../core/logger";
+import { TelegramService } from "../../core/telegram/service";
+import { buildDailySummary, finishedDayWindow } from "../../features/funnel/runs-summary";
+import { REPORT_AGENT_ID } from "../../core/config";
 
 const log: Logger = {
     info: (m) => console.log(m),

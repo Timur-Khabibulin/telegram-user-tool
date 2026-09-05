@@ -28,7 +28,7 @@ TBD - created by archiving change funnel-tracking. Update Purpose after archive.
 заданного константой `REPORT_AGENT_ID`, через `sendMessage("me", ...)`. Получатель
 отчёта SHALL быть независим от агента, владеющего данными воронки
 (`FUNNEL_ADMIN_AGENT_ID`) — эти два идентификатора не обязаны совпадать.
-`src/scripts/funnel-tracker.ts` SHALL принимать получателя аргументом `--send-as
+`src/scripts/periodic/funnel-tracker.ts` SHALL принимать получателя аргументом `--send-as
 <agentId>` с значением по умолчанию `REPORT_AGENT_ID`, отдельно от `--admin <agentId>`
 (владелец данных, по умолчанию `FUNNEL_ADMIN_AGENT_ID`).
 

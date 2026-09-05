@@ -1,4 +1,4 @@
-// scripts/distribute-channels.ts — round-robin распределение «сырого» списка каналов
+// scripts/ops/distribute-channels.ts — round-robin распределение «сырого» списка каналов
 // (без готового назначения агента, один линк на строку) по заданному подмножеству
 // агентов, с пропуском уже известных реестру discovery каналов.
 //
@@ -7,13 +7,13 @@
 // приходит per-row из CSV) — здесь входной список каналов без агента, а агент
 // выбирается round-robin из явного --agents списка.
 //
-// Запуск: tsx src/scripts/distribute-channels.ts --file <path> --agents agent6,agent8,... [--admin agent1]
+// Запуск: tsx src/scripts/ops/distribute-channels.ts --file <path> --agents agent6,agent8,... [--admin agent1]
 
 import * as fs from "fs";
-import { listAgentIds, FUNNEL_ADMIN_AGENT_ID } from "../core/config";
-import { normalizeChannelLink, registerChannel, getChannelStatus } from "../core/db/discovery";
-import { addJoinQueue } from "../core/db/join-queue";
-import type { Logger } from "../core/logger";
+import { listAgentIds, FUNNEL_ADMIN_AGENT_ID } from "../../core/config";
+import { normalizeChannelLink, registerChannel, getChannelStatus } from "../../core/db/discovery";
+import { addJoinQueue } from "../../core/db/join-queue";
+import type { Logger } from "../../core/logger";
 
 const log: Logger = {
     info: (m) => console.log(m),
@@ -36,7 +36,7 @@ function main(): void {
     const agentsArg = parseArg(argv, "--agents");
 
     if (!filePath || !agentsArg) {
-        log.error("usage: tsx src/scripts/distribute-channels.ts --file <path> --agents agent6,agent8,... [--admin agent1]");
+        log.error("usage: tsx src/scripts/ops/distribute-channels.ts --file <path> --agents agent6,agent8,... [--admin agent1]");
         process.exit(1);
     }
 

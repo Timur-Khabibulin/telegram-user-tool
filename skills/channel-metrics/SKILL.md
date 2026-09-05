@@ -70,6 +70,6 @@ tg_channel_metrics(
   полученные для метрик title/описание/посты.
 - Тот же прогон доступен из командной строки (для больших списков без
   ограничения на размер ответа инструмента):
-  `tsx src/scripts/channel-metrics.ts --input links.csv --output metrics.csv --agent <agentId> [--with-niche]`.
+  `tsx src/scripts/ops/channel-metrics.ts --input links.csv --output metrics.csv --agent <agentId> [--with-niche]`.
   CLI и скилл используют одну и ту же логику (`core/channel-metrics/run.ts`) —
   поведение идентично.

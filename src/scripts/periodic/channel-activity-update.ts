@@ -1,4 +1,4 @@
-// scripts/channel-activity-update.ts — плановый и ручной пересчёт двух групп
+// scripts/periodic/channel-activity-update.ts — плановый и ручной пересчёт двух групп
 // метрик канала, объединённых в одном скрипте (design.md channel-activity-percentiles,
 // Decision 8 — один проход по каналам агента вместо двух отдельных джобов):
 //   • охват (avg_views/subs_count) — перенесено без изменений из бывшего
@@ -36,10 +36,10 @@
 import { Api } from "telegram";
 import bigInt from "big-integer";
 
-import type { Logger } from "../core/logger";
-import { TelegramService, computeAvgViews } from "../core/telegram/service";
-import { FloodWaitError, ClientNotConnectedError } from "../core/telegram/errors";
-import { listAgentIds, AVG_VIEWS_CACHE_TTL_SECONDS } from "../core/config";
+import type { Logger } from "../../core/logger";
+import { TelegramService, computeAvgViews } from "../../core/telegram/service";
+import { FloodWaitError, ClientNotConnectedError } from "../../core/telegram/errors";
+import { listAgentIds, AVG_VIEWS_CACHE_TTL_SECONDS } from "../../core/config";
 import {
     initChannels,
     getChannelsForCoverageUpdate,
@@ -49,17 +49,17 @@ import {
     saveActivityPercentiles,
     type ChannelForActivityUpdate,
     type ChannelForAvgUpdate,
-} from "../core/db/channels";
-import { activityWindow, ActivityAccumulator } from "../features/activity-percentile";
-import { sleep, sleepRandom } from "../skills/util";
+} from "../../core/db/channels";
+import { activityWindow, ActivityAccumulator } from "../../features/activity-percentile";
+import { sleep, sleepRandom } from "../../skills/util";
 import * as fs from "fs";
-import { normalizeChannelLink } from "../core/db/discovery";
+import { normalizeChannelLink } from "../../core/db/discovery";
 import {
     V5_MSG_MARK_DELAY_MIN_SEC,
     V5_MSG_MARK_DELAY_MAX_SEC,
     V5_DELAY_EMPTY_MIN_SEC,
     V5_DELAY_EMPTY_MAX_SEC,
-} from "../core/config";
+} from "../../core/config";
 
 /**
  * Потолок ожидания FLOOD_WAIT (тот же фикс, что в channel-niche.ts и

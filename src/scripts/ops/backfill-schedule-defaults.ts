@@ -1,4 +1,4 @@
-// scripts/backfill-schedule-defaults.ts — разовый backfill дефолтов расписания
+// scripts/ops/backfill-schedule-defaults.ts — разовый backfill дефолтов расписания
 // (predictable-agent-scheduling): join-queue 3ч → 4ч, leave-banned 05:00 → 01:00.
 //
 // computeDefaultSchedule() применяется только при upsert БЕЗ явного schedule —
@@ -15,9 +15,9 @@
 //
 // Запуск: tsx backfill-schedule-defaults.ts
 
-import type { Logger } from "../core/logger";
-import { listAgentIds, DISPATCHER_TICK_MINUTES } from "../core/config";
-import { listTasks, upsertTask, computeDefaultSchedule, buildOffsetCron } from "../core/db/tasks";
+import type { Logger } from "../../core/logger";
+import { listAgentIds, DISPATCHER_TICK_MINUTES } from "../../core/config";
+import { listTasks, upsertTask, computeDefaultSchedule, buildOffsetCron } from "../../core/db/tasks";
 
 const log: Logger = {
     info: (m) => console.log(m),
