@@ -21,13 +21,15 @@ const BATCH_LIMIT_MAX = 20;
  * в контексте вступления остаётся на этой же общей ветке, без выделения.
  * `channels_too_much` (№21) сюда намеренно не входит — см. отдельную ветку
  * ниже (асимметрия с `users_too_much` подтверждена доком).
+ * `user_already_participant` тоже намеренно не входит (channel-not-found-
+ * recovery) — `joinDiscussionGroups` трактует его как успех (self-heal),
+ * поэтому сюда он больше не долетает как ошибка.
  */
 const JOIN_ERROR_TAGS = new Set([
     "username_not_occupied",
     "username_invalid",
     "channel_private",
     "channel_invalid",
-    "user_already_participant",
     "invite_request_sent",
     "invite_hash_expired",
     "invite_hash_invalid",

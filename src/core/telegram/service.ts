@@ -1420,8 +1420,18 @@ export class TelegramService {
                 // (канал пропускается на этот прогон, см. callWithFloodHandling выше).
                 const discussionInput = new Api.InputChannel({ channelId: discussionChat.id, accessHash: discussionChat.accessHash! });
 
-                await callWithFloodHandling(link, () =>
-                    this.invokeChecked(() => client.invoke(new Api.channels.JoinChannel({ channel: discussionInput }))));
+                // USER_ALREADY_PARTICIPANT (channel-not-found-recovery, design D1) —
+                // отдельный try/catch именно вокруг JoinChannel: identity уже собран
+                // из ResolveUsername/GetFullChannel выше, поэтому «уже участник»
+                // трактуется как успех (self-heal потерянной строки channels), а не
+                // проваливается в общий catch как error.
+                try {
+                    await callWithFloodHandling(link, () =>
+                        this.invokeChecked(() => client.invoke(new Api.channels.JoinChannel({ channel: discussionInput }))));
+                } catch (joinErr: any) {
+                    if (classifyTelegramErrorTag(joinErr) !== "user_already_participant") throw joinErr;
+                    this.log.info(`[telegram-user-tool] join — уже участник ${link}, трактуем как успех (self-heal)`);
+                }
 
                 const discussionChatId = discussionChat.id.toString();
                 const identity: JoinedChannelIdentity = {

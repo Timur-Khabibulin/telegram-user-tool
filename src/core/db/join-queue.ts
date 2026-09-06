@@ -172,6 +172,55 @@ export function getJoinedLinks(agentId: string, log: Logger): string[] {
     }
 }
 
+export interface JoinedLinkRow {
+    link: string;
+    updatedAt: number;
+}
+
+/**
+ * Ссылки со `status='joined'` вместе со временем простановки статуса
+ * (channel-not-found-recovery, разовая миграция cat4/cat7) — момент
+ * `updatedAt` нужен, чтобы отличить залипший `leaved_manual` (выставлен ДО
+ * повторного `joined`) от легитимного более позднего статуса.
+ */
+export function getJoinedLinksWithTimestamps(agentId: string, log: Logger): JoinedLinkRow[] {
+    const db = openDb(joinQueueDbPath(agentId));
+    try {
+        ensureTable(db);
+        const rows = db.prepare(`SELECT link, updatedAt FROM join_queue WHERE status = 'joined'`).all() as JoinedLinkRow[];
+        log.info(`[tg-join-queue] getJoinedLinksWithTimestamps — agentId=${agentId} returned=${rows.length}`);
+        return rows;
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Разовая миграция (channel-not-found-recovery, cat7): переводит перечисленные
+ * `joined`-ссылки обратно в `pending` — для каналов, у которых нет строки в
+ * `channels.db` того же агента (потеряны прежним `DELETE` в `syncChannels`).
+ * Повторное вступление подхватит их новой self-heal логикой
+ * (`USER_ALREADY_PARTICIPANT` → успех). Идемпотентно: ссылки не в `joined`
+ * этим вызовом не затрагиваются.
+ */
+export function requeueJoinedLinks(agentId: string, links: string[], log: Logger): { requeued: number } {
+    if (links.length === 0) return { requeued: 0 };
+    const db = openDb(joinQueueDbPath(agentId));
+    try {
+        ensureTable(db);
+        const now = Math.floor(Date.now() / 1000);
+        const placeholders = links.map(() => "?").join(",");
+        const result = db.prepare(`
+            UPDATE join_queue SET status = 'pending', updatedAt = ?
+            WHERE status = 'joined' AND link IN (${placeholders})
+        `).run(now, ...links);
+        log.info(`[tg-join-queue] requeueJoinedLinks — agentId=${agentId} requeued=${result.changes}`);
+        return { requeued: result.changes };
+    } finally {
+        db.close();
+    }
+}
+
 /**
  * Разовый бэкфилл (flood-wait-detection, design.md Migration Plan): сбрасывает все
  * `status='skipped'` обратно в `pending` с `attempts=0` — ссылки проходят повторную

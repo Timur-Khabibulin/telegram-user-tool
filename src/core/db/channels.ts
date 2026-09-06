@@ -34,7 +34,7 @@ const DEFAULT_THREAD_EXPIRE_SECONDS = 345600;
 
 // ─── Types ────────────────────────────────────────────────────────────
 
-export type ChannelStatus = "banned" | "format_error" | "suspend" | "only_comment" | "sleep" | "should_leave" | "leaved_from_banned" | "leaved_manual";
+export type ChannelStatus = "banned" | "format_error" | "suspend" | "only_comment" | "sleep" | "should_leave" | "leaved_from_banned" | "leaved_manual" | "not_found";
 
 interface ChannelRow {
     chatId: string;
@@ -304,49 +304,76 @@ function migrateActivityColumns(db: Database.Database): void {
     add("activity_updated_at", "INTEGER");
 }
 
+/** Статусы, которые считаются терминальными (агент сам не участник чата) — channel-not-found-recovery. */
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+    "banned", "suspend", "leaved_from_banned", "leaved_manual", "should_leave",
+]);
+
 /**
  * Синхронизирует таблицу channels с актуальными диалогами Telegram.
  * Карта chatId → {title, username} подготавливается вызывающей стороной
  * (TelegramService), чтобы слой БД не зависел от Telegram.
+ *
+ * channel-not-found-recovery: пропавшие из диалогов каналы больше не
+ * удаляются — активный статус (null/only_comment/sleep/format_error)
+ * переводится в 'not_found' (обратимо), терминальный статус не трогается
+ * (агент и не должен быть в диалоге, если сам вышел/забанен). Канал,
+ * вернувшийся в диалоги со status='not_found', возвращается в null.
  */
 export function syncChannels(
     agentId: string,
     telegramChannels: Map<string, { title: string; username: string | null }>,
     log: Logger,
-): { ok: true; added: number; removed: number; updated: number } {
+): { ok: true; added: number; updated: number; markedNotFound: number; clearedNotFound: number } {
     log.info(`[tg-channels-db] tg_channels_sync called — agentId=${agentId}`);
     const db = openDb(channelsDbPath(agentId));
     try {
         const dbChannels = new Map(
-            (db.prepare("SELECT chatId, title, chatUsername FROM channels").all() as
-                { chatId: string; title: string; chatUsername: string | null }[])
-                .map(({ chatId, title, chatUsername }) => [chatId, { title, chatUsername }]),
+            (db.prepare("SELECT chatId, title, chatUsername, status FROM channels").all() as
+                { chatId: string; title: string; chatUsername: string | null; status: string | null }[])
+                .map(({ chatId, title, chatUsername, status }) => [chatId, { title, chatUsername, status }]),
         );
 
         const toAdd = [...telegramChannels.entries()].filter(([chatId]) => !dbChannels.has(chatId));
-        const toRemove = [...dbChannels.keys()].filter((chatId) => !telegramChannels.has(chatId));
         const toUpdate = [...telegramChannels.entries()].filter(([chatId, { title, username }]) => {
             const existing = dbChannels.get(chatId);
             return existing !== undefined && (existing.title !== title || existing.chatUsername !== username);
         });
 
+        // Пропали из диалогов: активный статус → not_found, терминальный — не трогаем.
+        const toMarkNotFound = [...dbChannels.entries()]
+            .filter(([chatId, { status }]) => !telegramChannels.has(chatId) && !TERMINAL_STATUSES.has(status ?? "") && status !== "not_found")
+            .map(([chatId]) => chatId);
+
+        // Снова в диалогах и раньше были not_found → снять статус.
+        const toClearNotFound = [...telegramChannels.keys()]
+            .filter((chatId) => dbChannels.get(chatId)?.status === "not_found");
+
         const insertStmt = db.prepare(`
             INSERT OR IGNORE INTO channels (chatId, title, chatUsername, lastProcessedAt)
             VALUES (@chatId, @title, @chatUsername, 0)
         `);
-        const deleteStmt = db.prepare(`DELETE FROM channels WHERE chatId = ?`);
         const updateStmt = db.prepare(`UPDATE channels SET title = @title, chatUsername = @chatUsername WHERE chatId = @chatId`);
+        const markNotFoundStmt = db.prepare(`UPDATE channels SET status = 'not_found', statusUpdatedAt = strftime('%s','now') WHERE chatId = ?`);
+        const clearNotFoundStmt = db.prepare(`UPDATE channels SET status = NULL, statusUpdatedAt = NULL WHERE chatId = ?`);
 
         db.transaction(() => {
             for (const [chatId, { title, username }] of toAdd) insertStmt.run({ chatId, title, chatUsername: username });
-            for (const chatId of toRemove) deleteStmt.run(chatId);
             for (const [chatId, { title, username }] of toUpdate) updateStmt.run({ chatId, title, chatUsername: username });
+            for (const chatId of toMarkNotFound) markNotFoundStmt.run(chatId);
+            for (const chatId of toClearNotFound) clearNotFoundStmt.run(chatId);
         })();
 
         log.info(
-            `[tg-channels-db] tg_channels_sync — added=${toAdd.length} removed=${toRemove.length} updated=${toUpdate.length}`,
+            `[tg-channels-db] tg_channels_sync — added=${toAdd.length} updated=${toUpdate.length} markedNotFound=${toMarkNotFound.length} clearedNotFound=${toClearNotFound.length}`,
         );
-        return { ok: true, added: toAdd.length, removed: toRemove.length, updated: toUpdate.length };
+        return {
+            ok: true,
+            added: toAdd.length,
+            updated: toUpdate.length,
+            markedNotFound: toMarkNotFound.length,
+            clearedNotFound: toClearNotFound.length,
+        };
     } finally {
         db.close();
     }
@@ -368,7 +395,7 @@ export function getChannelsBatch(
             FROM channels
             WHERE (lastProcessedAt = 0
                OR lastProcessedAt <= strftime('%s','now') - @periodSeconds)
-               AND (status IS NULL OR status NOT IN ('banned', 'suspend', 'leaved_from_banned', 'leaved_manual', 'should_leave'))
+               AND (status IS NULL OR status NOT IN ('banned', 'suspend', 'leaved_from_banned', 'leaved_manual', 'should_leave', 'not_found'))
             ORDER BY lastProcessedAt ASC
             LIMIT @limit
         `).all({ periodSeconds, limit }) as ChannelRow[];
@@ -487,6 +514,59 @@ export function markChannelStatus(
             chatId,
         });
         log.info(`[tg-channels-db] markChannelStatus — agentId=${agentId} chatId=${chatId} status=${status} durationSeconds=${durationSeconds ?? "infinite"}`);
+    } finally {
+        db.close();
+    }
+}
+
+export interface ChannelStatusInfoRow {
+    chatId: string;
+    channelUsername: string | null;
+    chatUsername: string | null;
+    status: ChannelStatus | null;
+    statusUpdatedAt: number | null;
+}
+
+/**
+ * Каналы агента с идентичностью и статусом (channel-not-found-recovery,
+ * разовая миграция cat4/cat5) — сырьё для сопоставления с `join_queue` по
+ * `channelUsername`/`chatUsername` (в очереди нет `chatId`).
+ */
+export function getChannelsStatusInfo(agentId: string, log: Logger): ChannelStatusInfoRow[] {
+    const dbPath = channelsDbPath(agentId);
+    if (!fs.existsSync(dbPath)) return [];
+    const db = openDb(dbPath, true);
+    try {
+        const rows = db.prepare(`
+            SELECT chatId, channelUsername, chatUsername, status, statusUpdatedAt FROM channels
+        `).all() as ChannelStatusInfoRow[];
+        log.info(`[tg-channels-db] getChannelsStatusInfo — agentId=${agentId} returned=${rows.length}`);
+        return rows;
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Разовая миграция (channel-not-found-recovery, cat4/cat5): сбрасывает статус
+ * и всё связанное с ним (`statusUpdatedAt`/`statusDurationSeconds`/
+ * `status_description`) в NULL для перечисленных `chatId` — тем же набором
+ * полей, что и self-heal при join (`upsertChannelIdentityFromJoin`), но для
+ * каналов, которые уже стоят в `channels.db` и не проходят через join заново.
+ */
+export function resetChannelStatuses(agentId: string, chatIds: string[], log: Logger): { reset: number } {
+    if (chatIds.length === 0) return { reset: 0 };
+    const db = openDb(channelsDbPath(agentId));
+    try {
+        migrateStatusColumns(db);
+        const placeholders = chatIds.map(() => "?").join(",");
+        const result = db.prepare(`
+            UPDATE channels
+            SET status = NULL, statusUpdatedAt = NULL, statusDurationSeconds = NULL, status_description = NULL
+            WHERE chatId IN (${placeholders})
+        `).run(...chatIds);
+        log.info(`[tg-channels-db] resetChannelStatuses — agentId=${agentId} reset=${result.changes}`);
+        return { reset: result.changes };
     } finally {
         db.close();
     }
@@ -819,10 +899,15 @@ export interface JoinedChannelIdentityRow {
  * syncChannels/cacheChannelIdentities, которая иначе делает повторный
  * GetFullChannel за тот же факт. `initChannels` — на случай, если это первое
  * обращение к channels.db у агента (join-queue может отработать раньше
- * первого тика монитора). Idempotent: если строка уже есть (например, её
- * успел создать параллельный syncChannels), дозаполняет только
- * identity-поля, не трогая status/lastProcessedAt/title/chatUsername уже
- * существующей строки.
+ * первого тика монитора).
+ *
+ * channel-not-found-recovery (design D2): для уже существующей строки
+ * обновление ПОЛНОЕ — `status`/`statusUpdatedAt`/`statusDurationSeconds`/
+ * `status_description` сбрасываются в NULL безусловно (в т.ч. если было
+ * `banned`), `title`/`chatUsername` освежаются. Успешное вступление — это
+ * подтверждённый факт членства, поэтому любой прежний статус (в частности
+ * залипший `leaved_manual`) неактуален. `lastProcessedAt`, история визитов и
+ * метрики этим шагом не затрагиваются.
  */
 export function upsertChannelIdentityFromJoin(
     agentId: string,
@@ -836,11 +921,17 @@ export function upsertChannelIdentityFromJoin(
             INSERT INTO channels (chatId, title, chatUsername, lastProcessedAt, channelId, channelAccessHash, channelUsername, channelResolved, chatAccessHash)
             VALUES (@chatId, @title, @chatUsername, 0, @channelId, @channelAccessHash, @channelUsername, 1, @chatAccessHash)
             ON CONFLICT(chatId) DO UPDATE SET
+                title = excluded.title,
+                chatUsername = excluded.chatUsername,
                 channelId = excluded.channelId,
                 channelAccessHash = excluded.channelAccessHash,
                 channelUsername = excluded.channelUsername,
                 channelResolved = 1,
-                chatAccessHash = excluded.chatAccessHash
+                chatAccessHash = excluded.chatAccessHash,
+                status = NULL,
+                statusUpdatedAt = NULL,
+                statusDurationSeconds = NULL,
+                status_description = NULL
         `).run(identity);
         log.info(`[tg-channels-db] upsertChannelIdentityFromJoin — agentId=${agentId} chatId=${identity.chatId}`);
     } finally {
@@ -1468,7 +1559,7 @@ export function countActiveChannels(agentId: string): number {
     try {
         const row = db.prepare(`
             SELECT COUNT(*) AS c FROM channels
-            WHERE status IS NULL OR status NOT IN ('banned', 'suspend', 'leaved_from_banned', 'leaved_manual', 'should_leave')
+            WHERE status IS NULL OR status NOT IN ('banned', 'suspend', 'leaved_from_banned', 'leaved_manual', 'should_leave', 'not_found')
         `).get() as { c: number };
         return row.c;
     } catch {
