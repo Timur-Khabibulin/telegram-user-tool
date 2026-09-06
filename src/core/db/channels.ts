@@ -1399,6 +1399,100 @@ export function purgeChannelData(agentId: string, chatId: string, log: Logger): 
     return { ok: true };
 }
 
+// ─── Очередь ротации (channel-rotation) ────────────────────────────────
+//
+// Кросс-агентная суточная задача переносит каналы, покинутые из-за бана
+// (status='leaved_from_banned'), менее загруженному активному агенту.
+// Ссылка для повторного вступления — channelUsername (юзернейм привязанного
+// broadcast-канала, тот же приём, что channel-cleanup: normalizeChannelLink
+// (channelUsername) → forceAssignChannel/addJoinQueue). Без channelUsername
+// канал непередаваем — нет ссылки для нового агента.
+
+export interface RotationCandidateRow {
+    chatId: string;
+    channelUsername: string;
+    statusUpdatedAt: number | null;
+}
+
+/**
+ * Каналы агента в статусе 'leaved_from_banned' с известным channelUsername —
+ * кандидаты на перенос другому агенту, по возрастанию statusUpdatedAt
+ * (дольше всего висящие без хозяина — первыми).
+ */
+export function getRotationCandidates(agentId: string, log: Logger): RotationCandidateRow[] {
+    if (!fs.existsSync(channelsDbPath(agentId))) return [];
+    const db = openDb(channelsDbPath(agentId), true);
+    try {
+        const rows = db.prepare(`
+            SELECT chatId, channelUsername, statusUpdatedAt FROM channels
+            WHERE status = 'leaved_from_banned' AND channelUsername IS NOT NULL
+            ORDER BY statusUpdatedAt ASC
+        `).all() as RotationCandidateRow[];
+        log.info(`[tg-channels-db] getRotationCandidates — agentId=${agentId} returned=${rows.length}`);
+        return rows;
+    } catch {
+        return [];
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Число каналов агента в статусе 'leaved_from_banned' без channelUsername —
+ * непередаваемые ротацией (нет ссылки для нового агента), считаются отдельно
+ * для сводки прогона channel-rotation.
+ */
+export function countLeavedFromBannedWithoutUsername(agentId: string): number {
+    if (!fs.existsSync(channelsDbPath(agentId))) return 0;
+    const db = openDb(channelsDbPath(agentId), true);
+    try {
+        const row = db.prepare(`
+            SELECT COUNT(*) AS c FROM channels WHERE status = 'leaved_from_banned' AND channelUsername IS NULL
+        `).get() as { c: number };
+        return row.c;
+    } catch {
+        return 0;
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Активная нагрузка агента (channel-rotation) — число каналов, не исключённых
+ * фильтром «активен для обработки» (тот же список статусов, что getChannelsBatch).
+ * Используется для сортировки целевых агентов по возрастанию нагрузки.
+ */
+export function countActiveChannels(agentId: string): number {
+    if (!fs.existsSync(channelsDbPath(agentId))) return 0;
+    const db = openDb(channelsDbPath(agentId), true);
+    try {
+        const row = db.prepare(`
+            SELECT COUNT(*) AS c FROM channels
+            WHERE status IS NULL OR status NOT IN ('banned', 'suspend', 'leaved_from_banned', 'leaved_manual', 'should_leave')
+        `).get() as { c: number };
+        return row.c;
+    } catch {
+        return 0;
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Удаляет строку канала у агента-источника после успешного переноса другому
+ * агенту (channel-rotation) — канал уже покинут (leaveChannel выполнен
+ * leave-banned-channels ранее), данные ему на этом агенте больше не нужны.
+ */
+export function deleteChannelRow(agentId: string, chatId: string, log: Logger): void {
+    const db = openDb(channelsDbPath(agentId));
+    try {
+        const result = db.prepare(`DELETE FROM channels WHERE chatId = ?`).run(chatId);
+        log.info(`[tg-channels-db] deleteChannelRow — agentId=${agentId} chatId=${chatId} deleted=${result.changes}`);
+    } finally {
+        db.close();
+    }
+}
+
 // ─── Средний охват канала (channel-coverage-report) ──────────────────
 
 export interface ChannelForAvgUpdate {

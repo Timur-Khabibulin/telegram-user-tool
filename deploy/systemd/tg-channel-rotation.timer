@@ -1,0 +1,19 @@
+# Запуск ротации на границе полудня UTC+5 (12:00 UTC+5 = 07:00 UTC) —
+# сознательно на противоположной стороне суток от tg-daily-summary/
+# tg-funnel-tracker (19:00/19:10 UTC), с запасом ≥12ч. leave-banned-channels
+# не имеет единого фиксированного времени суток (per-agent период ~180 мин,
+# без выходных часов — QUIET_HOURS_EXEMPT_TASKS), поэтому точный час выбран
+# как разумный отступ от остальных суточных задач, а не как гарантия
+# отсутствия пересечения с каждым отдельным прогоном leave-banned-channels.
+# Persistent=true — если VPS был выключен в момент срабатывания, прогон
+# наверстается при следующем старте.
+
+[Unit]
+Description=Telegram channel rotation timer (12:00 UTC+5 = 07:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,21 @@
+# Суточная ротация каналов, покинутых из-за бана (channel-rotation):
+# передаёт leaved_from_banned-каналы менее загруженному активному агенту.
+# Oneshot, запускается таймером tg-channel-rotation.timer раз в день.
+# Только SQLite (реестр discovery.db лежит в workspace agent1) — Telegram не
+# трогает, вступление выполняет отдельный прогон join-queue.
+
+[Unit]
+Description=Telegram channel rotation (leaved_from_banned -> least-loaded active agent)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
+ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/channel-rotation.ts --admin agent1
+EnvironmentFile=-/root/.openclaw/codex-auth/.env
+EnvironmentFile=-/root/.openclaw/secrets.env
+Slice=tg-agents.slice
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal

@@ -70,7 +70,8 @@ src/
     db/         слой данных (SQLite)
   features/     готовые капабилити: discovery, channel-analysis, channel-metrics,
                 channel-context, channel-preview, proxy, tg-agent-autoregistration,
-                tg-agent-reauth-from-tdata, funnel, activity-percentile
+                tg-agent-reauth-from-tdata, funnel, activity-percentile,
+                channel-rotation
 
 skills/    SKILL.md — наследие до переноса логики в код (см. decisions/0001)
 deploy/    systemd-юниты
@@ -81,7 +82,7 @@ docs/      база знаний
 ## Слой данных
 
 Модули `src/core/db/` работают с SQLite через `better-sqlite3`. Каждый модуль
-управляет своими таблицами:
+управляет своими таблицами (полная ER-диаграмма — [db-schema.puml](db-schema.puml)):
 
 | Модуль (`core/db/`) | Таблицы | Данные |
 |---|---|---|
