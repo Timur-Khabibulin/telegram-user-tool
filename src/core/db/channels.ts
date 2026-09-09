@@ -441,12 +441,22 @@ export function markFullSyncDone(agentId: string, log: Logger): void {
     }
 }
 
-/** Общее число каналов агента (этап 1 воронки «каналов у агента»). */
+/**
+ * Число активных каналов агента (этап 1 воронки «каналов у агента»):
+ * все каналы, из которых агент физически не вышел. В отличие от
+ * `getChannelsBatch` (что монитору можно трогать прямо сейчас), здесь
+ * исключены только `leaved_from_banned`/`leaved_manual` — временные
+ * ограничения (`banned`/`suspend`/`should_leave`/`not_found` и т.д.)
+ * не означают потерю канала, он остаётся частью покрытия агента.
+ */
 export function countChannels(agentId: string): number {
     if (!fs.existsSync(channelsDbPath(agentId))) return 0;
     const db = openDb(channelsDbPath(agentId), true);
     try {
-        const row = db.prepare(`SELECT COUNT(*) AS c FROM channels`).get() as { c: number };
+        const row = db.prepare(`
+            SELECT COUNT(*) AS c FROM channels
+            WHERE status IS NULL OR status NOT IN ('leaved_from_banned', 'leaved_manual')
+        `).get() as { c: number };
         return row.c;
     } catch {
         return 0;

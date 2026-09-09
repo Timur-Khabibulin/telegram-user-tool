@@ -22,6 +22,11 @@ TBD - created by archiving change funnel-tracking. Update Purpose after archive.
 - **WHEN** у агента отключены обе версии задачи мониторинга
 - **THEN** агент отсутствует в таблице отчёта и не участвует в строке «Итого»
 
+#### Scenario: Каналов у агента — учитываются все, кроме тех, откуда вышли
+
+- **WHEN** считается «каналов у агента»
+- **THEN** в счёт входят каналы в любом статусе, кроме `leaved_from_banned`/`leaved_manual` (агент физически вышел из канала) — временные ограничения (`banned`, `suspend`, `should_leave`, `not_found`, `format_error`, `only_comment`, `sleep`) не исключаются из счёта
+
 ### Requirement: Доставка отчёта в Saved Messages agent1
 
 Система SHALL отправлять сформированный отчёт в Saved Messages (чат «me») аккаунта,

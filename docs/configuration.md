@@ -13,6 +13,7 @@
 | TGStat API | поиск каналов для channel-discovery | env `TGSTAT_TOKEN` (сейчас заглушка) |
 | asocks.com | подбор/провижининг мобильных прокси для новых и сломанных агентов | env `ASOCKS_API_KEY` |
 | Telegram Bot API (ревью-бот) | ручное подтверждение комментария перед отправкой (post-comment-review) | env `TELEGRAM_REVIEW_BOT_TOKEN`, `TELEGRAM_REVIEW_CHAT_ID` |
+| Telegram Bot API (бот распределения) | распределение каналов по агентам через бот (channel-distribution) | env `CHANNEL_DISTRIBUTION_BOT_TOKEN`, `CHANNEL_DISTRIBUTION_CHAT_ID` |
 
 ## Учётные данные аккаунта — `tg-account.json`
 
@@ -87,11 +88,13 @@
 | `ASOCKS_API_KEY` | доступ к asocks.com для подбора/провижининга мобильных прокси | `src/scripts/ops/provision-proxy-for-new-agent.ts`, `src/scripts/ops/provision-mobile-proxy.ts` |
 | `TELEGRAM_REVIEW_BOT_TOKEN` | токен общего Bot API-бота ручного ревью (post-comment-review) — один на платформу, не per-agent | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
 | `TELEGRAM_REVIEW_CHAT_ID` | id чата ревьюеров, куда бот шлёт запросы на подтверждение | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
+| `CHANNEL_DISTRIBUTION_BOT_TOKEN` | токен отдельного Bot API-бота распределения каналов (channel-distribution) — один на платформу, отдельный от ревью-бота (лимит один `getUpdates` на токен) | `src/core/distribution-bot-api.ts` (через `src/core/config.ts`) |
+| `CHANNEL_DISTRIBUTION_CHAT_ID` | id уполномоченного чата, из которого бот принимает команды и CSV (авторизация по чату, default-deny) | `src/core/distribution-bot-api.ts` (через `src/core/config.ts`) |
 
 Файл подключён как `EnvironmentFile=-/root/.openclaw/secrets.env` в плановых
 systemd-юнитах (`deploy/systemd/tg-agent@.service`, `tg-daily-summary.service`,
 `tg-funnel-tracker.service`, `tg-channel-activity-update.service`,
-`tg-review-listener.service`) — источник правды для них в репозитории, деплой
+`tg-review-listener.service`, `tg-distribution-listener.service`) — источник правды для них в репозитории, деплой
 на VPS через skill `vps` + `systemctl daemon-reload`.
 
 Интерактивные скиллы (например, `tg-agent-create-v2`) выполняются как дочерний

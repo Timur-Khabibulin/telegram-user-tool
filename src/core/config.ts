@@ -199,6 +199,24 @@ export function agentRestrictionsDbPath(adminAgentId: string): string {
     return path.join(workspaceDir(adminAgentId), "agent-restrictions.db");
 }
 
+/**
+ * Хранилище прогонов распределения каналов через бот (channel-distribution).
+ * Одна БД на всю платформу, лежит в workspace админ-агента — тот же приём, что
+ * discovery.db/funnel.db: платформенные данные в одном месте.
+ */
+export function distributionDbPath(adminAgentId: string): string {
+    return path.join(workspaceDir(adminAgentId), "channel-distribution.db");
+}
+
+/**
+ * Каталог загруженных администратором CSV-файлов распределения (channel-distribution,
+ * R26 — аудит). Лежит в workspace админ-агента, тот же приём, что reportsDir. Имена
+ * файлов несут UTC-timestamp, поэтому прогоны не перезатирают друг друга.
+ */
+export function distributionUploadsDir(adminAgentId: string): string {
+    return path.join(workspaceDir(adminAgentId), "distribution-uploads");
+}
+
 // ─── Конфигурация discovery (channel-discovery) ───────────────────────
 
 /**
@@ -219,6 +237,17 @@ export const TGSTAT_API_TOKEN = process.env.TGSTAT_TOKEN ?? "STUB_TGSTAT_TOKEN";
  */
 export const TELEGRAM_REVIEW_BOT_TOKEN = process.env.TELEGRAM_REVIEW_BOT_TOKEN ?? null;
 export const TELEGRAM_REVIEW_CHAT_ID = process.env.TELEGRAM_REVIEW_CHAT_ID ?? null;
+
+/**
+ * Токен и id уполномоченного чата бота распределения каналов (channel-distribution).
+ * Отдельный bot-токен от ревью-бота (Telegram допускает один long-poll getUpdates
+ * на токен, ревью-бот его уже держит). Тот же паттерн секретов, что
+ * TELEGRAM_REVIEW_*: из `~/.openclaw/secrets.env`, читается напрямую из
+ * `process.env`. Авторизация — по чату (R18): бот принимает команды и данные
+ * только из CHANNEL_DISTRIBUTION_CHAT_ID, всё прочее отбрасывается (default-deny).
+ */
+export const CHANNEL_DISTRIBUTION_BOT_TOKEN = process.env.CHANNEL_DISTRIBUTION_BOT_TOKEN ?? null;
+export const CHANNEL_DISTRIBUTION_CHAT_ID = process.env.CHANNEL_DISTRIBUTION_CHAT_ID ?? null;
 
 /**
  * География и язык поиска TGStat для RU-задачи (channels/search).

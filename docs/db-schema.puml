@@ -128,6 +128,19 @@ package "tg-channels.db  (per-agent)" #E8F0FE {
       • sleep (channel-post-watch, monitor-v3) — ещё 1 сутки после
         only_comment (итого 3 суток от комментария), канал не проверяется
         вовсе. Снимается общим механизмом истечения статуса.
+      • suspend (channel-suspend-on-deletion) — временное ограничение на
+        statusDurationSeconds; снимается автоматически по истечении.
+      • should_leave — оператор вручную решил, что канал агенту больше не
+        нужен. Ставится в очередь на выход (leave-banned-channels).
+      • leaved_from_banned / leaved_manual (leave-banned-channels) —
+        терминальные: агент вышел из канала (после banned / should_leave
+        соответственно). Единственные статусы, исключаемые из «каналов у
+        агента» в funnel-report (countChannels) — канал физически потерян.
+      • not_found — канал пропал из диалогов агента (не найден при синке).
+      ----
+      getChannelsBatch (monitor-v2..v5) исключает из обхода:
+      banned, suspend, leaved_from_banned, leaved_manual, should_leave,
+      not_found — то, что монитору сейчас нельзя/незачем трогать.
       ----
       <b>lastSeenChannelPostId</b> (channel-post-watch) — id последнего
       поста канала (в его собственной нумерации), на который агент

@@ -116,6 +116,7 @@ workspace агента. Правка `SOUL.md` шаблона применяет
 | `tg-channel-activity-update.service/.timer` | oneshot/timer | `03:00 UTC` (ежедневно) | пересчёт охвата канала (avg_views/subs_count) и активности чата (active_writers_p50/p90) — TTL 30 дней на канал по каждой группе метрик независимо |
 | `tg-channel-rotation.service/.timer` | oneshot/timer | `07:00 UTC` (ежедневно) | ротация каналов, покинутых из-за бана (`leaved_from_banned`) — перенос менее загруженному активному агенту |
 | `tg-review-listener.service` | simple, `Restart=always` | — (постоянно работает) | ручное ревью комментариев: единственный потребитель `getUpdates` общего Bot API-бота (post-comment-review), не по таймеру |
+| `tg-distribution-listener.service` | simple, `Restart=always` | — (постоянно работает) | распределение каналов по агентам через Telegram-бот (channel-distribution): приём CSV, балансировка, постановка в join-queue; отдельный bot-токен, не по таймеру. Загруженные файлы — в `~/.openclaw/workspace-agent1/distribution-uploads/`, история прогонов — `channel-distribution.db`, журнал — journald |
 
 Установка шаблонов:
 
@@ -132,6 +133,7 @@ systemctl daemon-reload
 systemctl enable --now tg-agent@<agentId>.timer
 systemctl enable --now tg-daily-summary.timer
 systemctl enable --now tg-review-listener.service   # persistent service, не timer
+systemctl enable --now tg-distribution-listener.service   # persistent service, не timer
 systemctl enable --now tg-funnel-tracker.timer
 systemctl enable --now tg-channel-activity-update.timer
 systemctl enable --now tg-channel-rotation.timer

@@ -1,0 +1,17 @@
+[Unit]
+Description=Channel-distribution Telegram bot listener (channel-distribution)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
+ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/distribution-listener.ts
+EnvironmentFile=-/root/.openclaw/secrets.env
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

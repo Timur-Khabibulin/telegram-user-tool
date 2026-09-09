@@ -71,6 +71,13 @@ function ensureSchema(db: Database.Database, key: string): void {
             ALTER TABLE discovered_channels_new RENAME TO discovered_channels;
         `);
     }
+    // Метрики произвольного меняющегося состава (channel-distribution): единое
+    // JSON-поле вместо фиксированных колонок выше. Легаси-колонки (sub_count/…)
+    // остаются на месте (обратимость, читателей у них нет), но новые метрики из
+    // CSV пишутся сюда — см. setChannelMetricsJson. Аддитивная миграция; стоит
+    // ПОСЛЕ пересборки таблицы v2/v3 выше, иначе пересборка отбросила бы колонку.
+    const colsAfterRebuild = (db.prepare(`PRAGMA table_info(discovered_channels)`).all() as { name: string }[]).map((c) => c.name);
+    if (!colsAfterRebuild.includes("metrics_json")) db.exec(`ALTER TABLE discovered_channels ADD COLUMN metrics_json TEXT`);
     // Имя пула агента (channel-pools): закрепляется один раз при первом присвоении,
     // читается funnel-report. Отдельная таблица, а не поле в tg-account.json — это
     // факт о распределении каналов, а не о телеграм-сессии.
@@ -166,6 +173,27 @@ export function setChannelMetrics(
     const db = openDb(adminAgentId);
     try {
         db.prepare(`UPDATE discovered_channels SET ${cols.join(", ")} WHERE canonical_link = ?`).run(...values, canonicalLink);
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Записывает метрики канала как единый JSON-объект произвольного состава
+ * (channel-distribution, R3): ключи — имена метрик (заголовки колонок CSV),
+ * значения — как есть из ячеек. Справочные данные, на распределение не влияют.
+ * Пустой объект метрик записывается как NULL (нет метрик — нет строки JSON).
+ * Канал должен уже существовать в реестре (вызывается после registerChannel).
+ */
+export function setChannelMetricsJson(
+    adminAgentId: string,
+    canonicalLink: string,
+    metrics: Readonly<Record<string, string>>,
+): void {
+    const json = Object.keys(metrics).length > 0 ? JSON.stringify(metrics) : null;
+    const db = openDb(adminAgentId);
+    try {
+        db.prepare(`UPDATE discovered_channels SET metrics_json = ? WHERE canonical_link = ?`).run(json, canonicalLink);
     } finally {
         db.close();
     }
