@@ -57,7 +57,8 @@
 |---|---|
 | `~/.openclaw/workspace-<agentId>/` | данные агента |
 | `~/.openclaw/personas/<personName>/` | общие шаблоны персон (`SOUL.md` и др.) — см. ниже |
-| `~/.openclaw/codex-auth/` | доступ к LLM (`auth.json`, `.env`) |
+| `~/.openclaw/codex-auth/` | OAuth-токен ChatGPT (`auth.json`) — primary LLM (codex-подписка), см. [configuration.md](configuration.md) |
+| `~/.openclaw/secrets.env` | секреты сервисов, включая `DEEPSEEK_API_KEY` (fallback LLM) |
 
 ### Данные агента `~/.openclaw/workspace-<agentId>/`
 
@@ -220,9 +221,9 @@ cron дефолтной задачи `monitor` при этом у каждого
 Код копируется на сервер через `scp` (skill `vps` или `scp -i ~/.ssh/vps_key`) в
 пути из таблицы соответствия выше. `daemon-reload` нужен только при изменении самих
 юнитов. Файлы конфигурации и секретов (состав — в
-[configuration.md](configuration.md)) размещаются на сервере по их путям.
-Интерактивный логин (`codex login`) выполняется локально, результат копируется на
-VPS через `scp`.
+[configuration.md](configuration.md)) размещаются на сервере по их путям. Доступ к
+LLM — primary через codex-подписку (`~/.openclaw/codex-auth/auth.json`, токен
+рефрешит библиотека), fallback — `DEEPSEEK_API_KEY` в `~/.openclaw/secrets.env`.
 
 После копирования файлы плагина должны принадлежать `root` — иначе OpenClaw
 блокирует загрузку (`blocked plugin candidate: suspicious ownership`). Файлы, залитые

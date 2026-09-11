@@ -3,34 +3,69 @@
 ## Purpose
 TBD - created by archiving change task-scheduler. Update Purpose after archive.
 ## Requirements
-### Requirement: codex через OAuth как primary
-Вызовы LLM SHALL идти на подписке ChatGPT Plus через codex по OAuth, без потокенной оплаты за primary. Primary-провайдер — `openai-oauth-provider`, модель `gpt-5.4-mini` (зависит от плана Codex).
+### Requirement: codex-подписка как primary через @openai-oauth/ai-sdk
 
-#### Scenario: Primary-вызов на подписке
-- **WHEN** скилл вызывает `complete()` или `completeObject()`
-- **THEN** запрос уходит на codex по OAuth-токену из `auth.json` ($0 для primary)
+Primary LLM SHALL идти на ChatGPT-подписку через `@openai-oauth/ai-sdk`
+(`createOpenAIOAuth(openaiCredentials({ authFilePath }))`), модель `gpt-5.6-sol`.
+Библиотека шлёт корректный codex-`originator`, поэтому запросы проходят гейтинг
+codex-бэкенда. Персона передаётся как `system` (доставка в codex — через механизм
+библиотеки).
 
-### Requirement: Единственный provider без failover
+#### Scenario: Primary-вызов на codex
 
-`LlmClient` SHALL оборачивать ровно одну модель (`codexProvider` на `gpt-5.4-mini`) через `createFallback` — вторая модель (`@ai-sdk/openai` по `OPENAI_API_KEY`) закомментирована в коде и не подключена. При ошибке/лимите primary запрос завершается ошибкой, автоматического переключения на другого провайдера сейчас нет.
+- **WHEN** скилл вызывает `complete()` или `completeObject()` и codex доступен
+- **THEN** запрос уходит на `gpt-5.6-sol` через `@openai-oauth/ai-sdk` на подписке
+  (без потокенной оплаты)
 
-#### Scenario: Rate-limit не переключает на другую модель
-- **WHEN** primary (codex) возвращает 429 или ошибку
-- **THEN** запрос завершается ошибкой; повторный успешный вызов возможен только после восстановления codex (нет второго провайдера в списке `createFallback`)
+### Requirement: codex-токен из общего auth.json с авто-рефрешем
 
-### Requirement: Автоматический рефреш токена с write-back
-Рефреш токена SHALL выполняться автоматически без ручного вмешательства, включая сохранение обновлённого токена между запусками процессов. При `ensureFresh: true` (дефолт) перед запросом проверяется access token; если протух — `refreshChatGptTokens()` обновляет его, и свежие токены пишутся обратно в `auth.json` (`writeAuthFile` с `last_refresh`). Условие — файл записываемый пользователем `tg`.
+Primary SHALL использовать общий `~/.openclaw/codex-auth/auth.json` (один codex-токен
+на все вызовы и всех агентов); рефреш access-token выполняет `@openai-oauth/ai-sdk`
+автоматически. Каталог `~/.openclaw/codex-auth/` не удаляется.
 
-#### Scenario: Коротко живущий диспетчер обновляет токен
-- **WHEN** диспетчер стартует с протухшим access token в `auth.json`
-- **THEN** токен рефрешится и записывается обратно; следующий процесс читает свежий токен
+#### Scenario: Токен обновляется автоматически
 
-### Requirement: Общий auth.json на всех агентов
-Один токен SHALL обслуживать всех агентов (общий пул лимита Plus). Файл — `~/.openclaw/codex-auth/auth.json`, в своей папке, отдельно от агентного `auth-profiles.json` OpenClaw. `LlmClient` указывает на него явно через `authFilePath`. Права: файл `chmod 600`, папка `codex-auth/` `700`, файл записываемый владельцем.
+- **WHEN** access-token в `auth.json` протух
+- **THEN** библиотека рефрешит его без ручного вмешательства, вызов проходит
 
-#### Scenario: Все агенты читают один файл
-- **WHEN** несколько агентов вызывают LLM
-- **THEN** все используют общий `~/.openclaw/codex-auth/auth.json` (общий пул лимита Plus)
+### Requirement: DeepSeek как fallback на любую ошибку primary
+
+При **любой** ошибке primary (codex) вызов SHALL автоматически повторяться на
+DeepSeek (`deepseek-flash`) через `ai-fallback` (`createFallback([primary, fallback])`).
+
+#### Scenario: Ошибка codex переключает на DeepSeek
+
+- **WHEN** primary (codex) возвращает любую ошибку (авторизация/гейтинг/лимит/сеть)
+- **THEN** тот же вызов исполняется fallback-моделью `deepseek-flash`; при её успехе
+  результат возвращается штатно
+
+#### Scenario: Оба провайдера недоступны
+
+- **WHEN** и codex, и DeepSeek возвращают ошибку
+- **THEN** вызов завершается ошибкой (как при единственном провайдере)
+
+### Requirement: Срабатывание фолбэка логируется
+
+Каждое переключение primary→fallback SHALL логироваться (с причиной — текстом ошибки
+primary) в stdout/stderr (journald), чтобы отказ codex и переход на платный DeepSeek
+не были тихими.
+
+#### Scenario: Фолбэк виден в логах
+
+- **WHEN** сработал фолбэк на DeepSeek
+- **THEN** в journald есть запись с причиной срабатывания (ошибкой primary)
+
+### Requirement: Аутентификация fallback-провайдера статическим API-ключом
+
+Fallback (DeepSeek) SHALL аутентифицироваться статическим ключом `DEEPSEEK_API_KEY`
+из окружения процесса (загружается из `~/.openclaw/secrets.env` через systemd
+`EnvironmentFile`), один ключ на всех агентов. Ключ обязателен — при его отсутствии
+`createLlmClient` завершается ошибкой конфигурации.
+
+#### Scenario: Ключ отсутствует
+
+- **WHEN** `DEEPSEEK_API_KEY` не задан в окружении
+- **THEN** `createLlmClient` бросает явную ошибку конфигурации, а не тихо теряет fallback
 
 ### Requirement: Structured output для скоринга и выбора сообщений
 
@@ -64,7 +99,7 @@ score, reason }`, `discovery/similar`).
 Персона SHALL браться из общего шаблона `~/.openclaw/personas/<personName>/
 SOUL.md`, где `<personName>` — значение поля `persona` из `tg-account.json`
 агента, и передаваться как `system`-сообщение — без системных промптов
-OpenClaw. Файл читается заново на каждый вызов диспетчера (не копируется в
+OpenClaw. Файл читается заново на каждый прогон диспетчера (не копируется в
 рабочую папку агента и не кэшируется между процессами).
 
 #### Scenario: SOUL.md шаблона персоны как system-сообщение
@@ -72,4 +107,3 @@ OpenClaw. Файл читается заново на каждый вызов д
 - **THEN** `soul` прочитан из `~/.openclaw/personas/<personName>/SOUL.md`
   (`<personName>` — персона агента из `tg-account.json`) и передан как
   `system`, системные промпты OpenClaw не применяются
-

@@ -42,8 +42,8 @@ workspace административного агента (`FUNNEL_ADMIN_AGENT_I
 - `suspend` (триггер 1) — ошибка `PEER_FLOOD`, возникшая при отправке DM или
   ответа в канал; `restriction_duration = 86400` (сутки — явно переопределяет
   дефолт).
-- `suspend` (триггер 2) — у агента минимум 2 канала со `channels.status =
-  'banned'`, у каждого `channels.statusUpdatedAt` не ранее 2 дней назад;
+- `suspend` (триггер 2) — у агента минимум 10 каналов со `channels.status =
+  'banned'`, у каждого `channels.statusUpdatedAt` не ранее 1 суток назад;
   `reason = "channels_banned"`; `restriction_duration = 259200` (3 дня,
   дефолт).
 
@@ -59,18 +59,17 @@ workspace административного агента (`FUNNEL_ADMIN_AGENT_I
 - **THEN** создаётся `agent_restrictions(restriction_type=suspend,
   restriction_duration=86400)`, текущий прогон немедленно останавливается
 
-#### Scenario: Второй забаненный канал за 2 дня создаёт suspend
-- **WHEN** у агента уже есть один канал со `status='banned'` и
-  `statusUpdatedAt` в последние 2 суток, и второй канал получает
-  `status='banned'` тоже в пределах последних 2 суток
+#### Scenario: Десятый забаненный канал за сутки создаёт suspend
+- **WHEN** у агента уже есть девять каналов со `status='banned'` и
+  `statusUpdatedAt` в последние сутки, и десятый канал получает
+  `status='banned'` тоже в пределах последних суток
 - **THEN** создаётся `agent_restrictions(restriction_type=suspend,
   reason="channels_banned", restriction_duration=259200)` тем же шагом, что
-  и простановка статуса второго канала
+  и простановка статуса десятого канала
 
-#### Scenario: Один забаненный канал не создаёт suspend
-- **WHEN** у агента ровно один канал со `status='banned'` за последние 2
-  суток
-- **THEN** `agent_restrictions` не создаётся по правилу «2 канала за 2 дня»
+#### Scenario: Менее 10 забаненных каналов не создают suspend
+- **WHEN** у агента менее 10 каналов со `status='banned'` за последние сутки
+- **THEN** `agent_restrictions` не создаётся по правилу «10 каналов за сутки»
 
 ### Requirement: Диспетчер проверяет ограничение перед запуском задач
 

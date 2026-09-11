@@ -33,5 +33,5 @@
 | [0003](0003-peercache-no-getentity.md) | peerCache из get_dialogs, без getEntity | принято |
 | [0004](0004-mark-as-read-idempotency.md) | Идемпотентность через ранний mark_as_read | принято |
 | [0005](0005-sqlite-per-agent.md) | SQLite на агента, тема на файл | принято |
-| [0006](0006-llm-codex-oauth-primary.md) | codex OAuth как основная LLM-модель | принято |
+| [0006](0006-llm-codex-oauth-primary.md) | codex OAuth как основная LLM-модель | заменено (codex primary + DeepSeek fallback) |
 | [0007](0007-core-vs-features-split.md) | Разделение `src/core/` на инфраструктуру и фичи | принято |

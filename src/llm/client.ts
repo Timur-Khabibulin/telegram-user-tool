@@ -1,8 +1,9 @@
 import * as path from "path";
 import * as os from "os";
 import { generateText, generateObject } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createOpenAIOAuth } from "openai-oauth-provider";
+import { createDeepSeek } from "@ai-sdk/deepseek";
+import { createOpenAIOAuth } from "@openai-oauth/ai-sdk";
+import { openaiCredentials } from "@openai-oauth/local";
 import { createFallback } from "ai-fallback";
 import { ZodError, type ZodType } from "zod";
 
@@ -18,20 +19,6 @@ export interface LlmCompleteOptions {
     system?: string;
     /** Пользовательский промпт шага скилла. */
     prompt: string;
-}
-
-/**
- * `system` уходит в ai-sdk как обычное сообщение `input[]` (role system/developer)
- * Responses API — рядовой элемент истории, не приоритетный канал. Codex OAuth
- * обвязка (`openai-oauth-provider`) перед отправкой перезаписывает пустой строкой
- * top-level поле `instructions` запроса, если оно не пришло явно — то есть
- * привилегированный "кто ты" канал, который ждёт codex-backend, у нас всегда пуст
- * (llm-instructions-field-fix). `providerOptions.openai.instructions` — то самое
- * поле; дублируем туда персону, чтобы она реально доехала как system-level
- * директива, а не только как рядовое сообщение в истории.
- */
-function providerOptionsFor(system: string | undefined) {
-    return system ? { openai: { instructions: system } } : undefined;
 }
 
 export interface LlmClient {
@@ -52,11 +39,6 @@ export interface LlmClient {
      * (скилл → status error, диспетчер всё равно сдвигает nextRun, R-D1).
      */
     completeObject<T>(opts: LlmCompleteOptions, schema?: ZodType<T>): Promise<T>;
-}
-
-/** Путь к общему auth.json для всех агентов (R: один токен на всех). */
-function codexAuthFilePath(): string {
-    return path.join(os.homedir(), ".openclaw", "codex-auth", "auth.json");
 }
 
 /** Извлекает JSON из ответа LLM (снимает markdown-код-блоки если есть). Бросает при невалидном JSON. */
@@ -124,16 +106,31 @@ function applyCoercions(value: unknown, issues: ZodIssueLike[]): unknown {
 }
 
 export function createLlmClient(): LlmClient {
-    const authFilePath = codexAuthFilePath();
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+        throw new Error(
+            "DEEPSEEK_API_KEY не задан в окружении (нужен как fallback, ожидается из ~/.openclaw/secrets.env)",
+        );
+    }
 
-    const codexProvider = createOpenAIOAuth({ authFilePath, ensureFresh: true });
-    // const openaiProvider = createOpenAI({ apiKey: process.env.OPENAI_API_KEY ?? "" });
+    // Primary — ChatGPT-подписка через codex (@openai-oauth/ai-sdk шлёт корректный
+    // originator). Токен — общий ~/.openclaw/codex-auth/auth.json, рефреш делает
+    // библиотека. Fallback — DeepSeek. Персона доезжает через `system` (маппинг в
+    // codex instructions — на стороне библиотеки).
+    const codexAuthFile = path.join(os.homedir(), ".openclaw", "codex-auth", "auth.json");
+    const codex = createOpenAIOAuth(openaiCredentials({ authFilePath: codexAuthFile }));
+    const deepseek = createDeepSeek({ apiKey });
 
+    // Любая ошибка primary (codex) → fallback на DeepSeek. Срабатывание логируется
+    // (journald), чтобы отказ codex и переход на платный DeepSeek не были тихими.
     const model = createFallback({
-        models: [
-            codexProvider.languageModel("gpt-5.4-mini"),
-            // openaiProvider("gpt-4o"),
-        ],
+        models: [codex("gpt-5.6-sol"), deepseek("deepseek-flash")],
+        shouldRetryThisError: () => true,
+        onError: (error, modelId) => {
+            console.warn(
+                `[llm] fallback: модель "${modelId}" упала (${error?.message ?? error}) — переключение на следующую`,
+            );
+        },
     });
 
     // Счётчик фактических запросов к модели (R: «запросов к LLM» в отчёте). Каждый
@@ -155,16 +152,14 @@ export function createLlmClient(): LlmClient {
         },
 
         async complete({ system, prompt }) {
-            const { text } = await genText({ model, system, prompt, providerOptions: providerOptionsFor(system) });
+            const { text } = await genText({ model, system, prompt });
             return text;
         },
 
         async completeObject<T>({ system, prompt }: LlmCompleteOptions, schema?: ZodType<T>): Promise<T> {
-            const providerOptions = providerOptionsFor(system);
-
             // Без схемы валидировать нечего — свободный JSON одним проходом.
             if (!schema) {
-                const { text } = await genText({ model, system, prompt, providerOptions });
+                const { text } = await genText({ model, system, prompt });
                 return extractJson(text) as T;
             }
 
@@ -175,7 +170,7 @@ export function createLlmClient(): LlmClient {
             // спускаемся на текстовый путь. Сетевые/авторизационные ошибки тоже
             // приведут сюда — текстовый путь честно повторит запрос и пробросит их.
             try {
-                const { object } = await genObject({ model, system, prompt, schema, providerOptions });
+                const { object } = await genObject({ model, system, prompt, schema });
                 return object;
             } catch {
                 // structured output недоступен — fallback ниже
@@ -201,7 +196,7 @@ export function createLlmClient(): LlmClient {
                         `\n\nПрошлый ответ не прошёл валидацию: ${issues}. ` +
                         "Верни ТОЛЬКО валидный JSON с правильными типами — без markdown-ограждения, без пояснений.";
                 }
-                const { text } = await genText({ model, system, prompt: prompt + feedback, providerOptions });
+                const { text } = await genText({ model, system, prompt: prompt + feedback });
                 lastText = text;
                 try {
                     return schema.parse(extractJson(text));

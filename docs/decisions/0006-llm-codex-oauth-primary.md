@@ -1,7 +1,16 @@
 # 0006. codex OAuth как основная LLM-модель
 
-- Статус: принято
+- Статус: заменено (2026-09-10) — новая реализация, change `llm-codex-primary-deepseek-fallback`
 - Дата: 2026-05-31
+
+> **Заменено.** Исходно (это ADR) codex был primary через `openai-oauth-provider` —
+> он умер: с ~08.09.2026 codex-бэкенд отвергает все модели «неблагословлённых»
+> клиентов (гейтинг по `originator`). Хронология: сначала мигрировали на DeepSeek
+> (`migrate-llm-to-deepseek`), затем вернули codex-подписку как **primary** через
+> живую библиотеку `@openai-oauth/ai-sdk` (модель `gpt-5.6-sol`, шлёт корректный
+> originator), а DeepSeek оставили **fallback** на любую ошибку
+> (`llm-codex-primary-deepseek-fallback`). Актуальное нормативное поведение —
+> `openspec/specs/llm-layer/spec.md`. Ниже — исторический контекст исходного решения.
 
 ## Контекст
 Скиллам нужна генерация текста и структурированного JSON. Хочется единого пула

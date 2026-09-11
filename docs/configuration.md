@@ -8,8 +8,8 @@
 | Сервис | Назначение | Источник доступа |
 |---|---|---|
 | Telegram (MTProto) | основной канал работы агента | `tg-account.json` агента |
-| LLM (codex OAuth) | генерация текста и структурированного JSON | `~/.openclaw/codex-auth/auth.json` |
-| LLM (OpenAI) | запасная модель (в коде отключена) | `OPENAI_API_KEY` |
+| LLM primary (codex-подписка) | генерация текста и структурированного JSON | `~/.openclaw/codex-auth/auth.json` (OAuth-токен ChatGPT) |
+| LLM fallback (DeepSeek) | резерв при любой ошибке primary | env `DEEPSEEK_API_KEY` |
 | TGStat API | поиск каналов для channel-discovery | env `TGSTAT_TOKEN` (сейчас заглушка) |
 | asocks.com | подбор/провижининг мобильных прокси для новых и сломанных агентов | env `ASOCKS_API_KEY` |
 | Telegram Bot API (ревью-бот) | ручное подтверждение комментария перед отправкой (post-comment-review) | env `TELEGRAM_REVIEW_BOT_TOKEN`, `TELEGRAM_REVIEW_CHAT_ID` |
@@ -65,26 +65,30 @@
 |---|---|
 | `staging/agent<N>/` | данные аккаунта до статуса `done`: `tdata/`, `status.json`. Не путать с `workspace-agent<N>/` — сюда `listAgentIds()` не заглядывает, недорегистрированный агент не виден платформенным cron-скриптам. |
 
-## LLM-доступ — `~/.openclaw/codex-auth/`
+## LLM-доступ — primary codex-подписка + fallback DeepSeek
 
-| Файл | Назначение |
-|---|---|
-| `auth.json` | OAuth-токен codex, общий на всех агентов |
-| `.env` | `OPENAI_API_KEY` для запасной модели (опционально) |
+Собирается в `src/llm/client.ts` (`createLlmClient`) через `ai-fallback`
+(`createFallback([primary, fallback])`):
 
-Путь к `auth.json` задан в `src/llm/client.ts` (`codexAuthFilePath`), параметр
-`ensureFresh: true` — токен обновляется автоматически. Основная модель —
-`gpt-5.4-mini` через codex-провайдер. Запасная модель (OpenAI) в `client.ts`
-закомментирована; пока она отключена, `.env` и `OPENAI_API_KEY` не требуются.
+- **Primary** — ChatGPT-подписка через codex: `@openai-oauth/ai-sdk`
+  (`createOpenAIOAuth(openaiCredentials({ authFilePath }))`), модель `gpt-5.6-sol`.
+  Токен — общий `~/.openclaw/codex-auth/auth.json` (OAuth ChatGPT, один на всех
+  агентов), рефреш access-token делает библиотека автоматически. Библиотека шлёт
+  корректный codex-`originator`, поэтому запросы проходят гейтинг ($0 за токены на
+  подписке). Каталог `codex-auth/` обязателен.
+- **Fallback** — DeepSeek `deepseek-flash` (`@ai-sdk/deepseek`), ключ
+  `DEEPSEEK_API_KEY` из `~/.openclaw/secrets.env`. Срабатывает на **любую** ошибку
+  primary; переключение логируется в journald. При отсутствии ключа `createLlmClient`
+  бросает явную ошибку конфигурации (fallback обязателен).
 
 ## Секреты внешних сервисов — `~/.openclaw/secrets.env`
 
-Ключи внешних (не-LLM) сервисов, читаемые скриптами напрямую из `process.env`
-(без dotenv-загрузки в коде — переменные должны быть в окружении процесса до
-старта).
+Ключи внешних сервисов, читаемые скриптами напрямую из `process.env` (без
+dotenv-загрузки в коде — переменные должны быть в окружении процесса до старта).
 
 | Переменная | Назначение | Читается в |
 |---|---|---|
+| `DEEPSEEK_API_KEY` | доступ к DeepSeek (`deepseek-flash`) — **fallback** LLM при любой ошибке codex-primary | `src/llm/client.ts` (`createLlmClient`) |
 | `ASOCKS_API_KEY` | доступ к asocks.com для подбора/провижининга мобильных прокси | `src/scripts/ops/provision-proxy-for-new-agent.ts`, `src/scripts/ops/provision-mobile-proxy.ts` |
 | `TELEGRAM_REVIEW_BOT_TOKEN` | токен общего Bot API-бота ручного ревью (post-comment-review) — один на платформу, не per-agent | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
 | `TELEGRAM_REVIEW_CHAT_ID` | id чата ревьюеров, куда бот шлёт запросы на подтверждение | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
