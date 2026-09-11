@@ -18,6 +18,7 @@
     "@mtcute/node": "^0.31.0",
     "@openai-oauth/ai-sdk": "^2.0.0",
     "@openai-oauth/local": "^2.0.0",
+    "@sinclair/typebox": "^0.34.48",
     "ai": "^6.0.193",
     "ai-fallback": "^2.0.1",
     "better-sqlite3": "^12.8.0",
@@ -30,7 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "openclaw": "github:openclaw/openclaw#v2026.3.24",
+    "openclaw": "2026.9.3",
     "typescript": "^5.5.3"
   },
   "private": true
