@@ -30,26 +30,23 @@ TBD - created by archiving change channel-cleanup. Update Purpose after archive.
 - **THEN** канал является кандидатом (единственное условие выполнено)
 
 ### Requirement: Выход из канала и удаление данных
-Для каждого кандидата инструмент SHALL сначала выполнить выход через Telegram API, затем удалить все рабочие данные агента по каналу из всех БД. Если выход не удался — данные SHALL NOT удаляться.
+
+Для каждого кандидата инструмент SHALL сначала выполнить выход через Telegram API,
+затем удалить все рабочие данные агента по каналу из всех БД и снять закрепление
+канала в рамках персоны агента. Если выход не удался — данные SHALL NOT удаляться, и
+закрепление SHALL NOT сниматься.
 
 #### Scenario: Успешный выход — данные удаляются
+
 - **WHEN** `leaveChannel` завершается успешно для кандидата
-- **THEN** выполняется `purgeChannelData` и канал удаляется из `discovered_channels` (best-effort)
+- **THEN** выполняется `purgeChannelData` и снимается закрепление канала в персоне
+  агента (best-effort)
 
 #### Scenario: Ошибка выхода — данные не удаляются
+
 - **WHEN** `leaveChannel` возвращает ошибку для кандидата
-- **THEN** данные агента по каналу НЕ удаляются, канал помечается как `leave_failed`, обработка остальных каналов продолжается
-
-### Requirement: Удаление из discovered_channels
-После успешного выхода инструмент SHALL удалить строку канала из `discovered_channels`. Удаление SHALL выполняться только если `channelResolved=1` и `channelUsername IS NOT NULL`; иначе — пропустить с incrementом `discoverySkipped`.
-
-#### Scenario: Канал с channelUsername удаляется из discovery
-- **WHEN** `channelResolved=1` и `channelUsername` задан
-- **THEN** строка с `canonical_link = normalizeChannelLink(channelUsername)` удаляется из `discovered_channels`
-
-#### Scenario: Канал без channelUsername — discovery не трогается
-- **WHEN** `channelUsername IS NULL` или `channelResolved=0`
-- **THEN** `discovered_channels` не изменяется, `discoverySkipped++`
+- **THEN** данные агента по каналу НЕ удаляются, закрепление НЕ снимается, канал
+  помечается как `leave_failed`, обработка остальных каналов продолжается
 
 ### Requirement: Изоляция агентов
 Чистка SHALL затрагивать только данные агентов, явно переданных в параметре `agents`. Данные других агентов SHALL NOT изменяться, даже если они состоят в тех же каналах.
@@ -68,4 +65,24 @@ TBD - created by archiving change channel-cleanup. Update Purpose after archive.
 #### Scenario: Кандидатов нет — сообщение об этом
 - **WHEN** ни один канал агента не проходит фильтры
 - **THEN** в Saved Messages отправляется: `[channel-cleanup] agent=<id>\nКандидатов не найдено по заданным фильтрам.`
+
+### Requirement: Удаление закрепления канала в персоне агента
+
+После успешного выхода инструмент SHALL удалить только закрепление канала в рамках
+персоны очищаемого агента (строку `channel_assignments` для пары `(персона агента,
+canonical_link)`), не затрагивая сам канал в `channels` и закрепления того же канала
+в других персонах. Удаление SHALL выполняться только если `channelResolved=1` и
+`channelUsername IS NOT NULL`; иначе — пропустить с инкрементом `discoverySkipped`.
+
+#### Scenario: Удаляется только закрепление персоны агента
+
+- **WHEN** `channelResolved=1`, `channelUsername` задан, и тот же канал закреплён
+  также в другой персоне
+- **THEN** удаляется закрепление `(персона агента, canonical_link)`; закрепление в
+  другой персоне и строка канала в `channels` не изменяются
+
+#### Scenario: Канал без channelUsername — реестр не трогается
+
+- **WHEN** `channelUsername IS NULL` или `channelResolved=0`
+- **THEN** закрепления не изменяются, `discoverySkipped++`
 

@@ -6,6 +6,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { File as MegaFile } from "megajs";
+import AdmZip from "adm-zip";
 import type { Logger } from "../../core/logger";
 import type { AccountConfig, DeviceConfig } from "../../core/config";
 import { loadPersonaTemplate, PersonaTemplateError, type PersonaTemplate } from "./persona-template";
@@ -13,13 +14,19 @@ import { computeAgentIdRange, checkAgentIdRangeFree } from "./id-range";
 import { stagingTdataDir, writeStagingStatus, readStagingStatus, promoteToWorkspace, type AccountStatus } from "./staging";
 import { assignDeviceForAgent, clearStagedDevice } from "./device-assignment";
 import type { ProxyConfig } from "../../core/config";
-import { readTdataAccountInfo, connectBootstrap, prepareAccount, TdataSetupError } from "../../core/tdata";
+import { readAccountPhone, connectBootstrap, prepareAccount, TdataSetupError } from "../../core/tdata";
 import { assignUsernameForAgent, clearStagedUsername } from "./username";
 import { selectWorkingProxy, type ProxySelectionOutcome } from "./proxy-selection";
 import { registerAgenticSession, type AgenticSessionOutcome } from "./agentic-session";
 
 export interface RunParams {
-    megaLinks: string[];
+    /** Ссылки на tdata-архивы, по одной на аккаунт. Источник — Mega folder-share
+     *  или Google Drive file-ссылка; вид определяется по URL в download-слое (design D1). */
+    links: string[];
+    /** Текущий 2FA-пароль аккаунтов пачки (один на весь прогон, design D4). */
+    twoFaPassword: string;
+    /** Создавать ли публичный канал персоны при реге (mode B). false = mode A (без канала). */
+    createPublicChannel: boolean;
     startAgentNumber: number;
     proxyRegion: string;
     maxProxyAttempts: number;
@@ -39,15 +46,25 @@ export interface RunReport {
 }
 
 /**
- * Скачивание одного архива из Mega (R-D2) — публичная share-ссылка на папку
- * (`mega.nz/folder/<id>#<key>`, ключ дешифровки в фрагменте URL, аккаунт не
- * нужен). Структура подтверждена вживую (`megajs`, реальная ссылка): ссылка
- * ведёт на папку с номером аккаунта, внутри которой лежит папка `tdata` —
- * её и ищем по имени, не полагаясь на позицию/глубину. Один `loadAttributes()`
- * на корне уже отдаёт всё вложенное дерево (проверено — вложенные подпапки tdata
- * приходят с уже заполненными `.children`), рекурсивный обход ничего не дозапрашивает.
+ * Скачивание одного архива в `destTdataDir` — источник-агностично (design D1):
+ * вид ссылки определяется по URL. Mega folder-share идёт прежним путём
+ * (`megajs`), Google Drive file-ссылка — через скачивание ZIP и распаковку.
+ * Нераспознанная ссылка — явная ошибка (вызывающий пометит аккаунт неуспехом
+ * и продолжит пачку).
  */
 async function downloadTdataArchive(link: string, destTdataDir: string, log: Logger): Promise<void> {
+    if (isGoogleDriveLink(link)) return downloadTdataFromGDrive(link, destTdataDir, log);
+    if (/mega\.nz/i.test(link)) return downloadTdataFromMega(link, destTdataDir, log);
+    throw new Error(`нераспознанный вид ссылки (ни Google Drive, ни Mega): ${link}`);
+}
+
+/**
+ * Mega (R-D2) — публичная share-ссылка на папку (`mega.nz/folder/<id>#<key>`,
+ * ключ дешифровки в фрагменте URL, аккаунт не нужен). Ссылка ведёт на папку с
+ * номером аккаунта, внутри которой лежит папка `tdata` — её ищем по имени.
+ * Один `loadAttributes()` на корне отдаёт всё вложенное дерево.
+ */
+async function downloadTdataFromMega(link: string, destTdataDir: string, log: Logger): Promise<void> {
     const root = MegaFile.fromURL(link);
     await root.loadAttributes();
 
@@ -56,7 +73,109 @@ async function downloadTdataArchive(link: string, destTdataDir: string, log: Log
         throw new Error(`в архиве ${link} не найдена папка tdata`);
     }
     await downloadMegaFolder(tdataNode, destTdataDir);
-    log.info(`[tg-agent-autoregistration] downloadTdataArchive — скачано в ${destTdataDir}`);
+    log.info(`[tg-agent-autoregistration] downloadTdataFromMega — скачано в ${destTdataDir}`);
+}
+
+function isGoogleDriveLink(link: string): boolean {
+    return /drive\.google\.com/i.test(link);
+}
+
+/** FILE_ID из `/file/d/<id>/...` или `?id=<id>` (design D2). */
+function extractGDriveFileId(link: string): string | null {
+    return link.match(/\/file\/d\/([^/?]+)/)?.[1] ?? link.match(/[?&]id=([^&]+)/)?.[1] ?? null;
+}
+
+/**
+ * Google Drive (design D2): скачивает файл-ZIP, распаковывает, ищет внутри
+ * папку `tdata` и копирует её содержимое в `destTdataDir`. Большие файлы Google
+ * отдаёт через HTML-интерстишл подтверждения — обрабатывается в downloadGDriveFile.
+ */
+async function downloadTdataFromGDrive(link: string, destTdataDir: string, log: Logger): Promise<void> {
+    const fileId = extractGDriveFileId(link);
+    if (!fileId) throw new Error(`не удалось извлечь FILE_ID из Google Drive ссылки: ${link}`);
+
+    const buf = await downloadGDriveFile(fileId);
+
+    const extractDir = path.join(path.dirname(destTdataDir), "_extract");
+    fs.rmSync(extractDir, { recursive: true, force: true });
+    fs.mkdirSync(extractDir, { recursive: true });
+    try {
+        new AdmZip(buf).extractAllTo(extractDir, true);
+    } catch (err: any) {
+        fs.rmSync(extractDir, { recursive: true, force: true });
+        throw new Error(`Google Drive: не удалось распаковать ZIP (${link}): ${err.message ?? err}`);
+    }
+
+    const tdataSrc = findTdataDirOnDisk(extractDir);
+    if (!tdataSrc) {
+        fs.rmSync(extractDir, { recursive: true, force: true });
+        throw new Error(`в архиве ${link} не найдена папка tdata`);
+    }
+    fs.mkdirSync(destTdataDir, { recursive: true });
+    fs.cpSync(tdataSrc, destTdataDir, { recursive: true });
+    fs.rmSync(extractDir, { recursive: true, force: true });
+    log.info(`[tg-agent-autoregistration] downloadTdataFromGDrive — скачано и распаковано в ${destTdataDir}`);
+}
+
+/**
+ * Прямое скачивание публичного файла Google Drive. Для больших файлов Google
+ * возвращает HTML-страницу «не удалось проверить на вирусы» с формой
+ * подтверждения — парсим её скрытые поля и повторяем запрос. Если и после этого
+ * приходит HTML (доступ не «всем по ссылке») — понятная ошибка (design D2).
+ */
+async function downloadGDriveFile(fileId: string): Promise<Buffer> {
+    const base = "https://drive.usercontent.google.com/download";
+    let res = await fetch(`${base}?id=${encodeURIComponent(fileId)}&export=download&confirm=t`);
+
+    if ((res.headers.get("content-type") ?? "").includes("text/html")) {
+        const query = parseGDriveConfirmForm(await res.text(), fileId);
+        if (!query) {
+            throw new Error("Google Drive: файл не отдаётся по ссылке (проверь, что доступ открыт «всем, у кого есть ссылка»)");
+        }
+        res = await fetch(`${base}?${query}`);
+        if ((res.headers.get("content-type") ?? "").includes("text/html")) {
+            throw new Error("Google Drive: после подтверждения всё ещё HTML — файл недоступен для скачивания по ссылке");
+        }
+    }
+    if (!res.ok) throw new Error(`Google Drive: HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+}
+
+/** Скрытые поля формы подтверждения GDrive → query-строка для повторного запроса. */
+function parseGDriveConfirmForm(html: string, fileId: string): string | null {
+    const tags = html.match(/<input[^>]*>/g) ?? [];
+    const sp = new URLSearchParams();
+    for (const tag of tags) {
+        if (!/type="hidden"/i.test(tag)) continue;
+        const name = tag.match(/name="([^"]+)"/)?.[1];
+        if (!name) continue;
+        sp.set(name, tag.match(/value="([^"]*)"/)?.[1] ?? "");
+    }
+    if (sp.toString() === "") return null;
+    if (!sp.has("id")) sp.set("id", fileId);
+    if (!sp.has("export")) sp.set("export", "download");
+    return sp.toString();
+}
+
+/** Рекурсивный поиск папки `tdata` в распакованном дереве на диске. */
+function findTdataDirOnDisk(root: string): string | null {
+    const stack = [root];
+    while (stack.length > 0) {
+        const dir = stack.pop() as string;
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const e of entries) {
+            if (!e.isDirectory()) continue;
+            const full = path.join(dir, e.name);
+            if (e.name === "tdata") return full;
+            stack.push(full);
+        }
+    }
+    return null;
 }
 
 function findTdataFolder(node: any): any | null {
@@ -94,13 +213,13 @@ function downloadMegaFile(file: any, destPath: string): Promise<void> {
 }
 
 export async function runAutoregistration(params: RunParams, log: Logger): Promise<RunReport> {
-    const { megaLinks, startAgentNumber, proxyRegion, maxProxyAttempts, personName } = params;
+    const { links, twoFaPassword, createPublicChannel, startAgentNumber, proxyRegion, maxProxyAttempts, personName } = params;
 
     // R-10: шаблон персоны читается до всего остального; отсутствие/неполнота —
     // стоп без скачивания, не exception наружу этой функции.
     let template: PersonaTemplate;
     try {
-        template = loadPersonaTemplate(personName);
+        template = loadPersonaTemplate(personName, createPublicChannel);
     } catch (err: any) {
         if (err instanceof PersonaTemplateError) {
             log.error(`[tg-agent-autoregistration] ${err.message}`);
@@ -109,8 +228,15 @@ export async function runAutoregistration(params: RunParams, log: Logger): Promi
         throw err;
     }
 
+    // Валидация 2FA-пароля — до скачивания чего-либо (design D4, pre-flight).
+    if (!twoFaPassword || !twoFaPassword.trim()) {
+        const reason = "twoFaPassword не задан — прогон не начат";
+        log.error(`[tg-agent-autoregistration] ${reason}`);
+        return { results: [], abortReason: reason };
+    }
+
     // R-8/R-11: диапазон ID — до скачивания чего-либо.
-    const agentIds = computeAgentIdRange(startAgentNumber, megaLinks.length);
+    const agentIds = computeAgentIdRange(startAgentNumber, links.length);
     const range = checkAgentIdRangeFree(agentIds);
     if (!range.ok) {
         const reason = `диапазон ID занят: ${range.conflicts.join(", ")} — прогон не начат`;
@@ -119,17 +245,31 @@ export async function runAutoregistration(params: RunParams, log: Logger): Promi
     }
 
     // R-7/R-D2/R-D3/R-11: один архив на аккаунт, все сразу, до цикла обработки.
-    for (let i = 0; i < megaLinks.length; i++) {
+    // Ошибка скачивания одного архива (например, приватная GDrive-ссылка) не
+    // роняет пачку: аккаунт помечается setup_failed и пропускается (design D2).
+    const downloadFailed = new Map<string, string>();
+    for (let i = 0; i < links.length; i++) {
         const agentId = agentIds[i];
         const tdataDir = stagingTdataDir(agentId);
         fs.mkdirSync(tdataDir, { recursive: true });
-        await downloadTdataArchive(megaLinks[i], tdataDir, log);
+        try {
+            await downloadTdataArchive(links[i], tdataDir, log);
+        } catch (err: any) {
+            const msg = err.message ?? String(err);
+            log.error(`[tg-agent-autoregistration] ${agentId} — ошибка скачивания: ${msg}`);
+            writeStagingStatus(agentId, "setup_failed", `download: ${msg}`);
+            downloadFailed.set(agentId, msg);
+        }
     }
 
     const results: AccountResult[] = [];
     for (const agentId of agentIds) {
+        if (downloadFailed.has(agentId)) {
+            results.push({ agentId, status: "setup_failed", error: `download: ${downloadFailed.get(agentId)}` });
+            continue;
+        }
         try {
-            results.push(await processAccount(agentId, template, proxyRegion, maxProxyAttempts, log));
+            results.push(await processAccount(agentId, template, twoFaPassword, createPublicChannel, proxyRegion, maxProxyAttempts, log));
         } catch (err: any) {
             // Непредвиденная ошибка (не TdataConnectError/TdataSetupError,
             // пойманные ниже) — не роняем весь прогон, фиксируем и идём дальше.
@@ -145,12 +285,13 @@ export async function runAutoregistration(params: RunParams, log: Logger): Promi
 async function processAccount(
     agentId: string,
     template: PersonaTemplate,
+    twoFaPassword: string,
+    createPublicChannel: boolean,
     proxyRegion: string,
     maxProxyAttempts: number,
     log: Logger,
 ): Promise<AccountResult> {
     const tdataPath = stagingTdataDir(agentId);
-    const { phoneNumber, currentPassword } = readTdataAccountInfo(tdataPath);
     const username = assignUsernameForAgent(agentId, template.profileData.nick);
     const { apiId, apiHash } = template.defaultAgentData;
     const device = assignDeviceForAgent(agentId);
@@ -164,7 +305,9 @@ async function processAccount(
             async (proxy) => {
                 const client = await connectBootstrap(tdataPath, proxy, apiId, apiHash, device, log);
                 try {
-                    await prepareAccount(client, template, currentPassword, username, log);
+                    // Телефон — из самого аккаунта (design D5), 2FA — из параметра (design D4).
+                    const phoneNumber = await readAccountPhone(client);
+                    await prepareAccount(client, template, twoFaPassword, username, log, createPublicChannel);
                     const agentic = await registerAgenticSession(
                         client,
                         apiId,
@@ -266,9 +409,9 @@ export async function retryManualCode(
         );
     }
 
-    const template = loadPersonaTemplate(personName);
+    // Ретрай второй сессии — канал не создаётся (уже создан или mode A), канальные файлы не нужны.
+    const template = loadPersonaTemplate(personName, false);
     const tdataPath = stagingTdataDir(agentId);
-    const { phoneNumber } = readTdataAccountInfo(tdataPath);
     const { apiId, apiHash } = template.defaultAgentData;
     const device = assignDeviceForAgent(agentId);
     // Тот же username, что уже применён к Telegram-аккаунту в первой попытке
@@ -284,6 +427,8 @@ export async function retryManualCode(
             async (proxy) => {
                 const client = await connectBootstrap(tdataPath, proxy, apiId, apiHash, device, log);
                 try {
+                    // Телефон — из самого аккаунта (design D5), сайдкары не читаются.
+                    const phoneNumber = await readAccountPhone(client);
                     const agentic = await registerAgenticSession(
                         client,
                         apiId,

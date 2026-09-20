@@ -337,11 +337,16 @@ export function listTasks(agentId: string): TaskRow[] {
     }
 }
 
-/** Активен ли агент (funnel-tracking v3): включена задача monitor, monitor-v2, monitor-v3 или monitor-v4. */
+/** Активен ли агент: включён хотя бы один монитор (monitor/monitor-v2…v5) ИЛИ account-warmup. */
 export function isAgentActive(agentId: string): boolean {
     return listTasks(agentId).some(
         (t) =>
-            (t.type === "monitor" || t.type === "monitor-v2" || t.type === "monitor-v3" || t.type === "monitor-v4" || t.type === "monitor-v5") &&
+            (t.type === "monitor" ||
+                t.type === "monitor-v2" ||
+                t.type === "monitor-v3" ||
+                t.type === "monitor-v4" ||
+                t.type === "monitor-v5" ||
+                t.type === "account-warmup") &&
             t.enabled === 1,
     );
 }

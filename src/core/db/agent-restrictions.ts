@@ -9,7 +9,7 @@
 import Database from "better-sqlite3";
 import { agentRestrictionsDbPath } from "../config";
 
-export type RestrictionType = "banned" | "need_update_session" | "suspend";
+export type RestrictionType = "banned" | "need_update_session" | "suspend" | "manual_reauth";
 
 export interface AgentRestrictionRow {
     agentId: string;
@@ -96,6 +96,38 @@ export function getActiveRestriction(adminAgentId: string, agentId: string): Age
             }
         }
         return row;
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Активные ограничения заданного типа по всем агентам (agent-reauth-sweep —
+ * выборка кандидатов на авто-реавторизацию по типу `need_update_session`). Для
+ * `suspend` с истёкшим TTL строка снимается тут же (delete-on-read, как в
+ * getActiveRestriction) и в выборку не попадает; у остальных типов
+ * (`need_update_session`/`banned`/`manual_reauth`) TTL нет — возвращаются все.
+ */
+export function listActiveByType(adminAgentId: string, type: RestrictionType): AgentRestrictionRow[] {
+    const db = openDb(adminAgentId);
+    try {
+        const rows = db.prepare(`
+            SELECT agentId, restriction_type, reason, restriction_duration, restricted_at
+            FROM agent_restrictions WHERE restriction_type = ?
+        `).all(type) as AgentRestrictionRow[];
+
+        if (type !== "suspend") return rows;
+
+        const now = Math.floor(Date.now() / 1000);
+        const active: AgentRestrictionRow[] = [];
+        for (const row of rows) {
+            if (row.restriction_duration != null && row.restricted_at + row.restriction_duration <= now) {
+                db.prepare(`DELETE FROM agent_restrictions WHERE agentId = ?`).run(row.agentId);
+                continue;
+            }
+            active.push(row);
+        }
+        return active;
     } finally {
         db.close();
     }

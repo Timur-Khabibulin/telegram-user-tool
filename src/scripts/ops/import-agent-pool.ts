@@ -1,3 +1,7 @@
+// DEPRECATED (channel-multipersona, 2026-09-13): пул-механика упразднена, per-persona
+// реестр не поддерживает (функции getChannelStatus/forceAssignChannel удалены). НЕ
+// запускать. Полный выпил — отдельная под-задача.
+//
 // scripts/ops/import-agent-pool.ts — массовый импорт канал→агент из готового CSV
 // (agentId;link;pool_name), с прямым назначением агента (без round-robin).
 //

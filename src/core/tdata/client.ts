@@ -38,13 +38,30 @@ export interface TdataAccountInfo {
     currentPassword: string;
 }
 
-/** phoneNumber из tdata/Accounts.txt, currentPassword из tdata/Password2FA.txt (R-2, R-3). */
+/**
+ * phoneNumber из tdata/Accounts.txt, currentPassword из tdata/Password2FA.txt.
+ * Используется `tg-agent-reauth-from-tdata`. Для `tg-agent-autoregistration`
+ * телефон берётся из аккаунта (`readAccountPhone`), а 2FA — параметром прогона
+ * (design D5), поэтому там эти сайдкары не читаются.
+ */
 export function readTdataAccountInfo(tdataPath: string): TdataAccountInfo {
     const phoneNumber = fs.readFileSync(path.join(tdataPath, "Accounts.txt"), "utf-8").trim();
     const currentPassword = fs.readFileSync(path.join(tdataPath, "Password2FA.txt"), "utf-8").trim();
     if (!phoneNumber) throw new Error(`tdata/Accounts.txt пуст: ${tdataPath}`);
     if (!currentPassword) throw new Error(`tdata/Password2FA.txt пуст: ${tdataPath}`);
     return { phoneNumber, currentPassword };
+}
+
+/**
+ * Номер телефона аккаунта — из самого аккаунта через getMe() на подключённой
+ * bootstrap-сессии (design D5, для tg-agent-autoregistration). getMe() для self
+ * всегда содержит phone; пустое значение — аномалия, явная ошибка.
+ */
+export async function readAccountPhone(client: TelegramClient): Promise<string> {
+    const me = await client.getMe();
+    const phone = (me as any)?.phone as string | undefined;
+    if (!phone) throw new Error("getMe() не вернул номер телефона аккаунта");
+    return phone;
 }
 
 /**
@@ -60,6 +77,19 @@ export function readTdataAccountInfo(tdataPath: string): TdataAccountInfo {
  * подтверждено рабочим на 19 реальных аккаунтах — единственный сбой был
  * `AUTH_KEY_UNREGISTERED`, то есть уже мёртвая сессия, а не порча ключа).
  */
+/** Таймаут одной сетевой операции bootstrap-коннекта (connect/getMe). Тот же
+ *  дефолт, что у ensureClient в core/telegram/service.ts. */
+const CONNECT_TIMEOUT_MS = 60_000;
+
+/** Гонит переданный промис с таймаутом: по истечении бросает, чтобы висящий
+ *  GramJS-RPC не держал прогон бесконечно. */
+function withTimeout<T>(op: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`)), timeoutMs),
+    );
+    return Promise.race([op, timeout]);
+}
+
 export async function connectBootstrap(
     tdataPath: string,
     proxy: ProxyConfig,
@@ -91,11 +121,16 @@ export async function connectBootstrap(
     });
 
     try {
-        await client.connect();
+        // И connect(), и getMe() гоняются с таймаутом: у «полуоткрытого» прокси
+        // TCP-коннект проходит, но RPC не отвечает, а GramJS уходит в бесконечный
+        // внутренний reconnect и голый await виснет навсегда. Таймаут бросает
+        // наружу → selectWorkingProxy берёт следующий кандидат (maxProxyAttempts),
+        // исчерпав — proxy_failed.
+        await withTimeout(client.connect(), CONNECT_TIMEOUT_MS, "connect");
         // getMe() — минимальная проверка, что сессия реально авторизована через
         // этот прокси, не просто TCP-коннект прошёл (симметрично ensureClient в
         // core/telegram/service.ts).
-        await client.getMe();
+        await withTimeout(client.getMe(), CONNECT_TIMEOUT_MS, "getMe");
         log.info(`[tdata] connectBootstrap — подключено через ${proxy.host}:${proxy.port}`);
         return client;
     } catch (err: any) {

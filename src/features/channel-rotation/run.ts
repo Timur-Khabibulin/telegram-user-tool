@@ -1,20 +1,21 @@
 // features/channel-rotation/run.ts — оркестрация суточной ротации каналов,
-// покинутых из-за бана (channel-rotation). Собирает кандидатов по всем
-// агентам платформы, строит план (plan.ts) и переносит назначения:
-// реестр (forceAssignChannel) → join-queue цели (addJoinQueue) → удаление
-// строки канала у агента-источника (deleteChannelRow).
+// покинутых из-за бана (channel-rotation, channel-multipersona). Собирает
+// кандидатов по всем агентам платформы, ГРУППИРУЕТ ИХ ПО ПЕРСОНЕ источника и
+// распределяет каждую группу независимо только по активным агентам своей персоны:
+// реестр (setAssignmentAgent) → join-queue цели (addJoinQueue) → удаление строки
+// канала у агента-источника (deleteChannelRow). Если у персоны нет активного
+// агента-цели, слот становится пустым (agent_id=NULL), канал остаётся в персоне.
 
 import type { Logger } from "../../core/logger";
-import { listAgentIds, FUNNEL_ADMIN_AGENT_ID } from "../../core/config";
-import { getActiveRestriction } from "../../core/db/agent-restrictions";
-import { isAgentActive } from "../../core/db/tasks";
+import { listAgentIds, FUNNEL_ADMIN_AGENT_ID, buildPersonaIndex } from "../../core/config";
+import { resolvePersonaTargets } from "../../core/persona-targets";
 import {
     getRotationCandidates,
     countLeavedFromBannedWithoutUsername,
-    countActiveChannels,
     deleteChannelRow,
 } from "../../core/db/channels";
-import { normalizeChannelLink, forceAssignChannel } from "../../core/db/discovery";
+import { getChannelVisitCounts } from "../../core/db/channel-operations";
+import { normalizeChannelLink, setAssignmentAgent } from "../../core/db/discovery";
 import { addJoinQueue } from "../../core/db/join-queue";
 import { planRotation, type RotationCandidate } from "./plan";
 
@@ -24,19 +25,6 @@ export interface ChannelRotationSummary {
     rotated: number;
     unassigned: number;
     byTargetAgent: Record<string, number>;
-}
-
-/**
- * Активные агенты-цели (channel-rotation): нет активного ограничения
- * (`agent_restrictions`) И включена хотя бы одна версия monitor-задачи
- * (`isAgentActive`). Агент, у которого канал был забанен, не исключается из
- * этого списка — исключение действует только для его собственного канала
- * (см. planRotation).
- */
-function getActiveTargetAgents(adminAgentId: string): string[] {
-    return listAgentIds().filter(
-        (agentId) => getActiveRestriction(adminAgentId, agentId) === null && isAgentActive(agentId),
-    );
 }
 
 function collectCandidates(agentIds: string[], log: Logger): { candidates: RotationCandidate[]; skippedNoUsername: number } {
@@ -57,34 +45,75 @@ function collectCandidates(agentIds: string[], log: Logger): { candidates: Rotat
 }
 
 /**
- * Суточный прогон ротации: находит каналы в `leaved_from_banned` по всем
- * агентам, распределяет их между активными агентами (round-robin по
- * нагрузке, plan.ts) и переносит назначение. Синхронно — только SQLite,
- * без обращения к Telegram (фактическое вступление делает join-queue).
+ * Суточный прогон ротации: находит каналы в `leaved_from_banned` по всем агентам,
+ * группирует кандидатов по персоне агента-источника и распределяет каждую группу
+ * независимо только по активным агентам своей персоны (по истории посещений —
+ * минимальный visit-count, plan.ts). Назначенному кандидату выставляется целевой агент в закреплении
+ * персоны; непристроенному (в персоне нет доступной цели) слот обнуляется — канал
+ * остаётся в персоне до следующего прогона. Синхронно — только SQLite, без
+ * обращения к Telegram (фактическое вступление делает join-queue).
  */
 export function runChannelRotation(log: Logger, adminAgentId: string = FUNNEL_ADMIN_AGENT_ID): ChannelRotationSummary {
     const allAgents = listAgentIds();
     const { candidates, skippedNoUsername } = collectCandidates(allAgents, log);
+    const personaIndex = buildPersonaIndex();
 
-    const activeAgents = getActiveTargetAgents(adminAgentId);
-    const loadByAgent = new Map(activeAgents.map((agentId) => [agentId, countActiveChannels(agentId)]));
-
-    const { assignments, unassigned } = planRotation(candidates, activeAgents, loadByAgent);
+    // Группируем кандидатов по персоне агента-источника: каждая персона ротируется
+    // независимо (R5/AC-6). Кандидаты без определимой персоны источника ротировать
+    // некуда — учитываем как unassigned, реестр не трогаем.
+    const byPersona = new Map<string, RotationCandidate[]>();
+    let unresolvedPersona = 0;
+    for (const candidate of candidates) {
+        const persona = personaIndex.get(candidate.sourceAgentId);
+        if (!persona) {
+            unresolvedPersona += 1;
+            log.warn(`[channel-rotation] персона источника ${candidate.sourceAgentId} не определена — кандидат ${candidate.channelUsername} пропущен`);
+            continue;
+        }
+        const group = byPersona.get(persona);
+        if (group) group.push(candidate);
+        else byPersona.set(persona, [candidate]);
+    }
 
     const byTargetAgent: Record<string, number> = {};
-    for (const { candidate, targetAgentId } of assignments) {
-        const link = normalizeChannelLink(candidate.channelUsername);
-        forceAssignChannel(adminAgentId, link, targetAgentId);
-        addJoinQueue(targetAgentId, [link], log);
-        deleteChannelRow(candidate.sourceAgentId, candidate.chatId, log);
-        byTargetAgent[targetAgentId] = (byTargetAgent[targetAgentId] ?? 0) + 1;
+    let rotated = 0;
+    let unassigned = unresolvedPersona;
+
+    for (const [persona, group] of byPersona) {
+        const activeAgents = resolvePersonaTargets(persona, adminAgentId, personaIndex);
+        // Visit-count per-channel из журнала операций (разрез персоны): для каждого
+        // кандидата — сколько раз канал уже назначался каждому агенту (channel-rotation-visit-history).
+        const visitsByChannel = new Map<string, Map<string, number>>(
+            group.map((candidate) => [
+                candidate.chatId,
+                new Map(Object.entries(getChannelVisitCounts(adminAgentId, candidate.chatId, persona))),
+            ]),
+        );
+        const plan = planRotation(group, activeAgents, visitsByChannel);
+
+        for (const { candidate, targetAgentId } of plan.assignments) {
+            const link = normalizeChannelLink(candidate.channelUsername);
+            setAssignmentAgent(adminAgentId, persona, link, targetAgentId, "module", log);
+            addJoinQueue(targetAgentId, [link], log);
+            deleteChannelRow(candidate.sourceAgentId, candidate.chatId, log);
+            byTargetAgent[targetAgentId] = (byTargetAgent[targetAgentId] ?? 0) + 1;
+            rotated += 1;
+        }
+        // Непристроенные: слот пуст (agent_id=NULL), строку закрепления сохраняем,
+        // строку канала у источника НЕ удаляем (кандидат переоценится следующим
+        // прогоном). Канал остаётся в персоне, в другую не уходит (AC-5).
+        for (const candidate of plan.unassigned) {
+            const link = normalizeChannelLink(candidate.channelUsername);
+            setAssignmentAgent(adminAgentId, persona, link, null, "module", log);
+            unassigned += 1;
+        }
     }
 
     const summary: ChannelRotationSummary = {
         candidatesTotal: candidates.length,
         skippedNoUsername,
-        rotated: assignments.length,
-        unassigned: unassigned.length,
+        rotated,
+        unassigned,
         byTargetAgent,
     };
 

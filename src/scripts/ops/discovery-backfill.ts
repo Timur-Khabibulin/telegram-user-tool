@@ -14,8 +14,8 @@
 // Design: docs/design/channel-discovery/channel-discovery-v1.md §5.3.
 
 import type { Logger } from "../../core/logger";
-import { FUNNEL_ADMIN_AGENT_ID, listAgentIds } from "../../core/config";
-import { normalizeChannelLink, registerChannel } from "../../core/db/discovery";
+import { FUNNEL_ADMIN_AGENT_ID, listAgentIds, buildPersonaIndex } from "../../core/config";
+import { normalizeChannelLink, assignToPersona } from "../../core/db/discovery";
 import { getJoinedLinks } from "../../core/db/join-queue";
 
 const log: Logger = {
@@ -38,13 +38,13 @@ function parseList(argv: string[], flag: string): string[] {
     return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-/** Заносит ссылки в реестр с владельцем agentId; возвращает число новых строк. */
-function seed(adminAgentId: string, links: string[], agentId: string): number {
+/** Закрепляет ссылки за agentId в рамках его персоны; возвращает число новых строк. */
+function seed(adminAgentId: string, links: string[], agentId: string, persona: string): number {
     let inserted = 0;
     for (const link of links) {
         if (!link) continue;
         const canonical = normalizeChannelLink(link);
-        if (registerChannel(adminAgentId, canonical, agentId).inserted) inserted += 1;
+        if (assignToPersona(adminAgentId, { persona, canonicalLink: canonical, agentId }, "operator", log).assigned) inserted += 1;
     }
     return inserted;
 }
@@ -54,13 +54,19 @@ function main(): void {
     const adminAgentId = parseArg(argv, "--admin") ?? FUNNEL_ADMIN_AGENT_ID;
     const agentsArg = parseList(argv, "--agents");
     const agents = agentsArg.length > 0 ? agentsArg : listAgentIds();
+    const personaIndex = buildPersonaIndex();
 
     const perAgent: Record<string, number> = {};
 
     // 1) Из join_queue каждого агента — только успешно вступлённые (status='joined').
     for (const agentId of agents) {
+        const persona = personaIndex.get(agentId);
+        if (!persona) {
+            log.warn(`[discovery-backfill] персона агента ${agentId} не определена — пропуск`);
+            continue;
+        }
         const links = getJoinedLinks(agentId, log);
-        perAgent[agentId] = (perAgent[agentId] ?? 0) + seed(adminAgentId, links, agentId);
+        perAgent[agentId] = (perAgent[agentId] ?? 0) + seed(adminAgentId, links, agentId, persona);
     }
 
     // 2) Ручные публичные каналы (не прошедшие через очередь).
@@ -71,7 +77,12 @@ function main(): void {
             log.error("[discovery-backfill] --manual требует --manual-agent <agentId>");
             process.exit(1);
         }
-        perAgent[manualAgent] = (perAgent[manualAgent] ?? 0) + seed(adminAgentId, manual, manualAgent);
+        const manualPersona = personaIndex.get(manualAgent);
+        if (!manualPersona) {
+            log.error(`[discovery-backfill] персона агента ${manualAgent} не определена`);
+            process.exit(1);
+        }
+        perAgent[manualAgent] = (perAgent[manualAgent] ?? 0) + seed(adminAgentId, manual, manualAgent, manualPersona);
     }
 
     log.info(`[discovery-backfill] done — seeded perAgent=${JSON.stringify(perAgent)}`);

@@ -1,9 +1,11 @@
 ---
 name: dm-replies-cron-setup
-description: "Creates a cron job for periodic DM reply processing for a given agent. Use when the user wants to set up a scheduled DM replies task (Cron 3) for a specific agent."
+description: "DEPRECATED — выведен из эксплуатации. Creates a cron job for periodic DM reply processing for a given agent. Use when the user wants to set up a scheduled DM replies task (Cron 3) for a specific agent."
 ---
 
 # DM Replies Cron Setup
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Шаг 1 — Определить agentId
 

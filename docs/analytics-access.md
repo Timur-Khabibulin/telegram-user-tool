@@ -62,8 +62,8 @@ ssh -i <ключ> root@<VPS_HOST> 'sqlite3 -separator "|" <путь-к-db> "<SQL
 |---|---|---|
 | `funnel.db` | `daily_stats` | дневная воронка платформы (ответы, DM, просмотры, подписчики, заявки — дельта+абсолют) |
 | `funnel.db` | `channel_snapshots` | сырые снапшоты метрик каналов |
-| `discovery.db` | `discovered_channels` | реестр найденных каналов, `assigned_agent` (nullable — NULL = в пуле прогона), `banned_at` |
-| `discovery.db` | `agent_pools` | имя пула, закреплённое за агентом |
+| `discovery.db` | `channels` | реестр каналов: одна строка на канал, метрики канала (`sub_count`/`avg_views`/…/`metrics_json`), `added_at` |
+| `discovery.db` | `channel_assignments` | закрепление в разрезе персоны: PK `(persona, canonical_link)`, `agent_id` (nullable — NULL = пустой слот после бана до ротации) |
 | `private-invites.db` | `private_invite_links` | инвайт-ссылка в приватный канал на агента, `post_updated`(0\|1) |
 
 ## Статус-модели

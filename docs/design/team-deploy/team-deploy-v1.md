@@ -9,8 +9,8 @@
 ## Текущий деплой (один разработчик)
 
 1. Локально: `scp` / skill `vps` → копирует `src/`, `index.ts`, `openclaw.json` на VPS
-   в `~/.openclaw/extensions/telegram-user-tool/`
-2. SSH: `chown -R root:root ~/.openclaw/extensions/telegram-user-tool`
+   в `~/openclaw-plugins/telegram-user-tool/`
+2. SSH: `chown -R root:root ~/openclaw-plugins/telegram-user-tool`
 3. SSH: `openclaw gateway restart`
 4. Логи: только через SSH + `journalctl`
 
@@ -64,8 +64,8 @@ mkdir -p /home/deploy/tg-tool-staging
 ```
 # /etc/sudoers.d/deploy
 deploy ALL=(ALL) NOPASSWD: \
-  /usr/bin/rsync -a /home/deploy/tg-tool-staging/ /root/.openclaw/extensions/telegram-user-tool/, \
-  /bin/chown -R root:root /root/.openclaw/extensions/telegram-user-tool, \
+  /usr/bin/rsync -a /home/deploy/tg-tool-staging/ /root/openclaw-plugins/telegram-user-tool/, \
+  /bin/chown -R root:root /root/openclaw-plugins/telegram-user-tool, \
   /usr/local/bin/openclaw gateway restart, \
   /usr/bin/journalctl -u tg-agent@* *
 ```
@@ -116,8 +116,8 @@ jobs:
           username: deploy
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
-            sudo rsync -a /home/deploy/tg-tool-staging/ /root/.openclaw/extensions/telegram-user-tool/
-            sudo chown -R root:root /root/.openclaw/extensions/telegram-user-tool
+            sudo rsync -a /home/deploy/tg-tool-staging/ /root/openclaw-plugins/telegram-user-tool/
+            sudo chown -R root:root /root/openclaw-plugins/telegram-user-tool
             sudo openclaw gateway restart
 ```
 

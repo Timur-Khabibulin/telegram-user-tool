@@ -77,7 +77,7 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    Code["Общий код платформы\n~/.openclaw/extensions/telegram-user-tool/"]
+    Code["Общий код платформы\n~/openclaw-plugins/telegram-user-tool/"]
 
     subgraph sd["systemd · tg-agents.slice  (CPUQuota=70% · MemoryMax=2G)"]
         T1["timer@agent1\nкаждые 10 мин ±2"]

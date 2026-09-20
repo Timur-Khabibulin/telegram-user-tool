@@ -8,7 +8,7 @@
 //           --min-subs 1000 [--min-avg-reach 500] [--admin agent1] [--agents a,b]
 
 import type { Logger } from "../../core/logger";
-import { FUNNEL_ADMIN_AGENT_ID, listAgentIds, TGSTAT_API_TOKEN } from "../../core/config";
+import { FUNNEL_ADMIN_AGENT_ID, TGSTAT_API_TOKEN } from "../../core/config";
 import { runDiscovery, renderReport } from "../../features/discovery/run";
 import { TelegramService } from "../../core/telegram/service";
 
@@ -39,18 +39,13 @@ async function main(): Promise<void> {
     const keywords = parseList(argv, "--keywords");
     const target = Number(parseArg(argv, "--n"));
     const minSubscribers = Number(parseArg(argv, "--min-subs"));
-    const agentsArg = parseList(argv, "--agents");
-    const agents = agentsArg.length > 0 ? agentsArg : listAgentIds();
+    const persona = parseArg(argv, "--persona");
     const minAvgReach = parseArg(argv, "--min-avg-reach");
     const avgReachAgent = parseArg(argv, "--avg-reach-agent");
 
     if (keywords.length === 0 || !Number.isFinite(target) || target <= 0
-        || !Number.isFinite(minSubscribers)) {
-        log.error("[discovery] usage: --keywords a,b --n <N> --min-subs <n> [--min-avg-reach <n>] [--avg-reach-agent <agentId>] [--admin agent1] [--agents a,b]");
-        process.exit(1);
-    }
-    if (agents.length === 0) {
-        log.error("[discovery] нет агентов для раскладки (listAgentIds() пуст и --agents не задан)");
+        || !Number.isFinite(minSubscribers) || !persona) {
+        log.error("[discovery] usage: --keywords a,b --n <N> --min-subs <n> --persona <name> [--min-avg-reach <n>] [--avg-reach-agent <agentId>] [--admin agent1]");
         process.exit(1);
     }
     if (!TGSTAT_API_TOKEN || TGSTAT_API_TOKEN === "STUB_TGSTAT_TOKEN") {
@@ -66,10 +61,10 @@ async function main(): Promise<void> {
     }
 
     const minAvgPostReach = minAvgReach != null ? Number(minAvgReach) : undefined;
-    log.info(`[discovery] start — keywords=${keywords.length} N=${target} minSubs=${minSubscribers}${minAvgPostReach != null ? ` minAvgReach=${minAvgPostReach}` : ""}${avgReachAgent ? ` avgReachAgent=${avgReachAgent}` : ""} agents=${agents.join(",")}`);
+    log.info(`[discovery] start — keywords=${keywords.length} N=${target} minSubs=${minSubscribers}${minAvgPostReach != null ? ` minAvgReach=${minAvgPostReach}` : ""}${avgReachAgent ? ` avgReachAgent=${avgReachAgent}` : ""} persona=${persona}`);
 
     try {
-        const result = await runDiscovery({ keywords, target, minSubscribers, minAvgPostReach, avgReachAgentId: avgReachAgent, telegramService, adminAgentId, agents, tgstatToken: TGSTAT_API_TOKEN }, log);
+        const result = await runDiscovery({ keywords, target, minSubscribers, minAvgPostReach, avgReachAgentId: avgReachAgent, telegramService, adminAgentId, persona, tgstatToken: TGSTAT_API_TOKEN }, log);
         log.info(`[discovery] done — collected=${result.collected} perAgent=${JSON.stringify(result.perAgent)}`);
         console.log("\n" + renderReport(result) + "\n");
     } finally {

@@ -1,9 +1,11 @@
 ---
 name: account-warmup
-description: "Telegram account warming: reads unread chats and marks them as read to simulate live user activity. Use when the agent needs to run the warmup routine. Triggers: 'прогрев аккаунта', 'warmup', 'run account-warmup', 'прочитать чаты'."
+description: "DEPRECATED — выведен из эксплуатации. Telegram account warming: reads unread chats and marks them as read to simulate live user activity. Use when the agent needs to run the warmup routine. Triggers: 'прогрев аккаунта', 'warmup', 'run account-warmup', 'прочитать чаты'."
 ---
 
 # Account Warmup — Прогрев аккаунта
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Цель
 

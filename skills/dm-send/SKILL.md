@@ -1,9 +1,11 @@
 ---
 name: dm-send
-description: "Daily DM outreach: send direct messages to top-scored candidates from dm_candidates. Uses dm_threads for cooldown tracking and thread creation. Use when the agent needs to run the daily DM sending routine. Triggers: 'send DMs', 'dm outreach', 'run dm-send', 'daily dm'."
+description: "DEPRECATED — выведен из эксплуатации. Daily DM outreach: send direct messages to top-scored candidates from dm_candidates. Uses dm_threads for cooldown tracking and thread creation. Use when the agent needs to run the daily DM sending routine. Triggers: 'send DMs', 'dm outreach', 'run dm-send', 'daily dm'."
 ---
 
 # DM Send — Ежедневная отправка личных сообщений
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Цель
 

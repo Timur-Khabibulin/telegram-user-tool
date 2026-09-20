@@ -11,18 +11,17 @@
 // disconnect() НЕ вызывается — это ответственность вызывающей стороны (скрипт
 // рвёт соединения в finally; плагин-гейтвей переиспользует общий клиент).
 //
-// funnel-tracking v3: перед сбором отфильтровываются неактивные агенты (нет
-// enabled monitor любой версии — monitor/monitor-v2/monitor-v3/monitor-v4,
-// см. isAgentActive) — см. docs/design/funnel-tracking/architecture-v3.md.
+// funnel-tracking v3: перед сбором отфильтровываются неактивные агенты (нет ни
+// enabled monitor любой версии, ни enabled account-warmup — см. isAgentActive) —
+// см. docs/design/funnel-tracking/architecture-v3.md.
 
 import * as fs from "fs";
 import Database from "better-sqlite3";
 
-import { listAgentIds, repliesDbPath, REPORT_AGENT_ID } from "../../core/config";
+import { listAgentIds, repliesDbPath, REPORT_AGENT_ID, buildPersonaIndex } from "../../core/config";
 import { getChannelSendBreakdown } from "../../core/db/replies";
 import { isAgentActive } from "../../core/db/tasks";
 import { listPrivateInviteLinks } from "../../core/db/private-invites";
-import { getAgentPool } from "../../core/db/discovery";
 import { startOfUtcPlus5Day, type DayWindow } from "./runs-summary";
 import type { TelegramService } from "../../core/telegram/service";
 import type { Logger } from "../../core/logger";
@@ -111,8 +110,8 @@ export interface AgentFunnelRow {
     note1to4?: string;
     /** Пометка о пропуске сбора этапов 5-7 (нет канала в профиле, MTProto-ошибка). */
     note5to7?: string;
-    /** Имя пула агента (channel-pools) — null, если не закреплено. Только для CSV-отчёта. */
-    poolName: string | null;
+    /** Персона агента (значение AccountConfig.persona) — null, если не определена. Только для CSV-отчёта. */
+    persona: string | null;
     /** Активное ограничение агента на момент сбора (agent-restrictions), null — не ограничен. */
     restrictionType: RestrictionType | null;
 }
@@ -139,6 +138,18 @@ export interface CollectOptions {
     persist: boolean;
     adminAgentId: string;
     privateChannelId?: string;
+    /**
+     * Рвать MTProto-соединение каждого агента сразу после сбора его этапов 5-7,
+     * с паузой перед снятием замка (TelegramService.disconnectAgent). Для
+     * таймерного скрипта funnel-tracker, который обходит все сессии подряд одним
+     * процессом: без этого клиенты копятся открытыми до финального disconnect()
+     * (обрезается таймаутом, освобождает 1-2 сессии из десятков) и создают риск
+     * AUTH_KEY_DUPLICATED при следующем heartbeat тех же агентов. Пауза между
+     * disconnect и следующим агентом заодно разносит подключения во времени.
+     * Плагин-гейтвей (persist=false) НЕ выставляет флаг — он переиспользует один
+     * общий долгоживущий клиент и рвать его между агентами нельзя.
+     */
+    disconnectAfterEachAgent?: boolean;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -201,7 +212,7 @@ export async function collectFunnel(
     opts: CollectOptions,
     log: Logger,
 ): Promise<FunnelResult> {
-    const { window, persist, adminAgentId, privateChannelId } = opts;
+    const { window, persist, adminAgentId, privateChannelId, disconnectAfterEachAgent } = opts;
     const nowSec = Math.floor(Date.now() / 1000);
     const guardDayStart = startOfUtcPlus5Day(nowSec);
 
@@ -266,6 +277,7 @@ export async function collectFunnel(
         restrictionType: r.restriction_type,
     }));
 
+    const personaIndex = buildPersonaIndex();
     for (const agentId of activeAgentIds) {
         const row: AgentFunnelRow = {
             agentId,
@@ -287,7 +299,7 @@ export async function collectFunnel(
             publicSubsDelta: null,
             privateRequestsAbs: null,
             privateRequestsDelta: null,
-            poolName: getAgentPool(adminAgentId, agentId),
+            persona: personaIndex.get(agentId) ?? null,
             restrictionType: null,
         };
 
@@ -350,34 +362,31 @@ export async function collectFunnel(
         const restriction = getActiveRestriction(adminAgentId, agentId);
         row.restrictionType = restriction?.restriction_type ?? null;
         let personal: Awaited<ReturnType<typeof tg.getOwnPersonalChannel>> | undefined;
-        if (restriction && (restriction.restriction_type === "need_update_session" || restriction.restriction_type === "banned")) {
+        if (restriction && (restriction.restriction_type === "need_update_session" || restriction.restriction_type === "banned" || restriction.restriction_type === "manual_reauth")) {
             log.info(`[funnel-collect] agent=${agentId} stages 5-7 skipped: restricted (${restriction.restriction_type})`);
         } else {
-            // Таймаут на весь блок (не только на connect): зависший внутри GramJS вызов
-            // без исключения иначе блокирует остальных агентов и отправку отчёта целиком.
+            // Блок-таймаут снят (решение оператора 2026-09-18): 60с резали легитимный
+            // медленный connect (бюджет ensureClient — 3×60с) и теряли метрики охвата.
+            // Сам connect защищён своим таймаутом (ConnectTimeoutError после 3 попыток),
+            // поэтому дохлый прокси не подвесит прогон навсегда. try/catch по-прежнему
+            // изолирует сбой одного агента от остальных и от отправки отчёта.
             try {
-                await withTimeout(
-                    (async () => {
-                        tg.loadAccount(agentId);
-                        personal = await tg.getOwnPersonalChannel();
-                        if (!personal) {
-                            row.note5to7 = "нет канала в профиле";
-                        } else {
-                            if (personal.postId != null) {
-                                const realPostId = await tg.resolvePersonalPostId(personal.inputPeer, personal.postId);
-                                if (realPostId != null) {
-                                    row.postViewsAbs = await tg.getPostViews(personal.inputPeer, realPostId);
-                                }
-                            }
-                            row.publicSubsAbs = await tg.getChannelSubsCount(personal.inputChannel);
+                tg.loadAccount(agentId);
+                personal = await tg.getOwnPersonalChannel();
+                if (!personal) {
+                    row.note5to7 = "нет канала в профиле";
+                } else {
+                    if (personal.postId != null) {
+                        const realPostId = await tg.resolvePersonalPostId(personal.inputPeer, personal.postId);
+                        if (realPostId != null) {
+                            row.postViewsAbs = await tg.getPostViews(personal.inputPeer, realPostId);
                         }
+                    }
+                    row.publicSubsAbs = await tg.getChannelSubsCount(personal.inputChannel);
+                }
 
-                        row.postViewsDelta = deltaOf(row.postViewsAbs, prevSnapshot?.postViews ?? null);
-                        row.publicSubsDelta = deltaOf(row.publicSubsAbs, prevSnapshot?.publicChannelSubs ?? null);
-                    })(),
-                    AGENT_STAGES_5_TO_7_TIMEOUT_MS,
-                    `agent=${agentId} stages 5-7`,
-                );
+                row.postViewsDelta = deltaOf(row.postViewsAbs, prevSnapshot?.postViews ?? null);
+                row.publicSubsDelta = deltaOf(row.publicSubsAbs, prevSnapshot?.publicChannelSubs ?? null);
             } catch (err: any) {
                 row.note5to7 = `этапы 5-7 пропущены: ${err.message ?? err}`;
                 log.warn(`[funnel-collect] agent=${agentId} stages 5-7 skipped: ${err.message ?? err}`);
@@ -411,6 +420,14 @@ export async function collectFunnel(
                 privateRequestsDelta: row.privateRequestsDelta,
                 privateRequestsAbs: row.privateRequestsAbs,
             });
+        }
+
+        // Пер-агентный teardown (см. CollectOptions.disconnectAfterEachAgent):
+        // рвём соединение этого агента и держим паузу перед взятием следующего.
+        // No-op, если агент был пропущен без подключения (ограничение) — метод
+        // сверяет, что именно этот agentId сейчас загружен.
+        if (disconnectAfterEachAgent) {
+            await tg.disconnectAgent(agentId);
         }
 
         result.agents.push(row);

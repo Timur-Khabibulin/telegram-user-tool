@@ -20,7 +20,7 @@ import { TdataConnectError } from "../../core/tdata";
 
 const execFileAsync = promisify(execFile);
 
-const SCRIPT_PATH = path.join(__dirname, "..", "..", "scripts", "provision-proxy-for-new-agent.ts");
+const SCRIPT_PATH = path.join(__dirname, "..", "..", "scripts", "ops", "provision-proxy-for-new-agent.ts");
 
 async function runTsx(args: string[]): Promise<string> {
     const { stdout } = await execFileAsync("npx", ["tsx", SCRIPT_PATH, ...args]);

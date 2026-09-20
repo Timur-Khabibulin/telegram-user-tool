@@ -1,9 +1,11 @@
 ---
 name: join-queue-run
-description: "Cron skill: processes one batch from the join queue. Joins channels, updates statuses, self-deletes the cron job when queue is exhausted."
+description: "DEPRECATED — выведен из эксплуатации. Cron skill: processes one batch from the join queue. Joins channels, updates statuses, self-deletes the cron job when queue is exhausted."
 ---
 
 # Join Queue Run
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Алгоритм выполнения
 

@@ -36,7 +36,7 @@ exit-ip/design.md`).
 ## Как выполнять
 
 ```
-ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/.openclaw/extensions/telegram-user-tool && \
+ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/openclaw-plugins/telegram-user-tool && \
   ./node_modules/.bin/tsx src/scripts/ops/provision-mobile-proxy.ts \
   --agents <agentId1,agentId2,...> \
   [--country <country>] \

@@ -1,3 +1,7 @@
+// DEPRECATED (channel-multipersona, 2026-09-13): пул-механика (NULL-пул реестра)
+// упразднена, per-persona реестр не поддерживает (функции getUnassignedChannels/
+// assignChannel удалены). НЕ запускать. Полный выпил — отдельная под-задача.
+//
 // scripts/ops/distribute-pool.ts — ручное распределение нераспределённых каналов из discovery.db.
 //
 // Читает каналы с assigned_agent IS NULL (пул незавершённого прогона discovery-similar)
@@ -62,7 +66,7 @@ function main(): void {
         if (tries >= allAgents.length) break;
 
         const agent = allAgents[i];
-        const { assigned: ok } = assignChannel(adminAgentId, canonical, agent);
+        const { assigned: ok } = assignChannel(adminAgentId, canonical, agent, "operator", log);
         if (ok) {
             addJoinQueue(agent, [canonical], log);
             assigned[agent] += 1;

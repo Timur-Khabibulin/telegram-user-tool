@@ -1,9 +1,11 @@
 ---
 name: dm-replies
-description: "Process incoming DM replies using push-model: detect unread DMs via telegram_get_dm_dialogs, match with dm_threads, continue dialogue with full context. Use when the agent needs to check for and respond to replies in active DM conversations. Triggers: 'check dm replies', 'process dm replies', 'reply to dms', 'dm dialogue', 'run dm-replies'."
+description: "DEPRECATED — выведен из эксплуатации. Process incoming DM replies using push-model: detect unread DMs via telegram_get_dm_dialogs, match with dm_threads, continue dialogue with full context. Use when the agent needs to check for and respond to replies in active DM conversations. Triggers: 'check dm replies', 'process dm replies', 'reply to dms', 'dm dialogue', 'run dm-replies'."
 ---
 
 # DM Replies — Обработка входящих ответов на DM
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Цель
 

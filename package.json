@@ -19,6 +19,7 @@
     "@openai-oauth/ai-sdk": "^2.0.0",
     "@openai-oauth/local": "^2.0.0",
     "@sinclair/typebox": "^0.34.48",
+    "adm-zip": "^0.5.18",
     "ai": "^6.0.193",
     "ai-fallback": "^2.0.1",
     "better-sqlite3": "^12.8.0",
@@ -30,6 +31,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.0.0",
     "openclaw": "2026.9.3",
     "typescript": "^5.5.3"

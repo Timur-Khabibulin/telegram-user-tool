@@ -51,7 +51,7 @@ import {
     type ChannelForAvgUpdate,
 } from "../../core/db/channels";
 import { activityWindow, ActivityAccumulator } from "../../features/activity-percentile";
-import { sleep, sleepRandom } from "../../skills/util";
+import { sleep, sleepRandom, randomDelayMs } from "../../skills/util";
 import * as fs from "fs";
 import { normalizeChannelLink } from "../../core/db/discovery";
 import {
@@ -245,7 +245,37 @@ async function updateAgent(
 // одним запросом). Здесь считаем только то, ради чего скрипт и нужен —
 // активность пишущих; subs_count идёт бесплатно, он приходит в том же
 // GetFullChannel, который нужен ради linkedChatId.
-const INPUT_COLUMNS = ["link", "title", "subs_count", "active_writers_p50", "active_writers_p90", "messages", "error"] as const;
+// Метрика режима списка: КОММЕНТАРИИ В ДЕНЬ за последние 30 суток.
+//
+// Считается по самим постам канала: число комментариев уже лежит в посте
+// (`replies.replies` → ChannelPost.comments), поэтому историю группы обсуждения
+// читать не нужно вовсе. Разница в цене принципиальная: месяц постов — единицы
+// запросов и секунды, тогда как подсчёт активных пишущих через историю
+// обсуждения стоил ~18 минут на канал, а на миллионниках — сутки (2026-08-27).
+//
+// От количества постов метрика не зависит: канал с 16 постами и канал с 200
+// сравниваются одинаково — по тому, сколько обсуждения он порождает в сутки.
+// Медиану по дням не считаем: у канала, постящего раз в неделю, большинство
+// дней окна пустые, и медиана вырождается в 0 — бесполезное число.
+const POSTS_WINDOW_DAYS = 30;
+// Забор постов имитирует листание ленты: мелкие случайные порции с паузой
+// между ними вместо одного запроса на 100 постов — иначе это ровный
+// «машинный» обход, из-за которого сессии и попадают под лимиты.
+const POSTS_BATCH_MIN = 2;
+const POSTS_BATCH_MAX = 4;
+const POSTS_BATCH_DELAY_MIN_SEC = 2;
+const POSTS_BATCH_DELAY_MAX_SEC = 8;
+// Предохранители от каналов с сотнями постов в день: обрываем обход, а не висим.
+const POSTS_MAX_REQUESTS = 400;
+const POSTS_MAX_POSTS = 800;
+
+const INPUT_COLUMNS = [
+    "link", "title", "subs_count",
+    "posts_30d",         // справочно: в расчёт метрики НЕ входит
+    "total_comments",    // сумма комментариев под всеми постами окна
+    "comments_per_day",  // ЦЕЛЕВАЯ МЕТРИКА: total_comments / 30
+    "error",
+] as const;
 
 function csvCell(v: string): string {
     return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
@@ -281,7 +311,7 @@ async function runFromInput(agentId: string, inputPath: string, outputPath: stri
     log.info(`[channel-activity-update] режим списка: агент=${agentId}, ссылок=${links.length}, уже обработано=${processed.size}`);
 
     const tg = new TelegramService(log);
-    const { startSec, endSec } = activityWindow();
+    const sinceSec = Math.floor(Date.now() / 1000) - POSTS_WINDOW_DAYS * 86400;
     let done = 0;
 
     try {
@@ -301,30 +331,39 @@ async function runFromInput(agentId: string, inputPath: string, outputPath: stri
                 if (!handle) {
                     row = [key, "", "", "", "", "", "канал не найден"];
                 } else {
-                    // GetFullChannel нужен ради linkedChatId; subs_count приходит тем же
-                    // ответом, поэтому берём его бесплатно.
+                    // GetFullChannel ради subs_count и признака включённых комментариев.
                     const gate = await tg.getChannelGateInfo(handle.inputChannel);
                     await sleepRandom(INTRA_CHANNEL_MIN_SEC, INTRA_CHANNEL_MAX_SEC);
 
-                    // Активность считается по связанной группе обсуждения; без неё
-                    // писать некому — метрика неприменима, это не ошибка канала.
-                    let p50 = "", p90 = "", msgs = "", err = "";
-                    if (gate.linkedChatId) {
-                        const acc = new ActivityAccumulator();
-                        for await (const m of tg.iterChatHistorySince(gate.linkedChatId, startSec, endSec)) acc.add(m);
-                        const r = acc.finalize();
-                        p50 = String(r.p50);
-                        p90 = String(r.p90);
-                        msgs = String(acc.count);
-                    } else {
+                    let postsCount = "", total = "", perDay = "", err = "";
+                    if (!gate.linkedChatId) {
+                        // Комментарии выключены — считать нечего. Это результат, не сбой.
                         err = "нет группы обсуждения";
+                    } else {
+                        const posts = await tg.getPostsSince(handle.inputChannel, sinceSec, {
+                            maxRequests: POSTS_MAX_REQUESTS,
+                            maxPosts: POSTS_MAX_POSTS,
+                            pageSize: () => POSTS_BATCH_MIN + Math.floor(Math.random() * (POSTS_BATCH_MAX - POSTS_BATCH_MIN + 1)),
+                            pageDelayMs: () => randomDelayMs(POSTS_BATCH_DELAY_MIN_SEC, POSTS_BATCH_DELAY_MAX_SEC),
+                        });
+                        if (posts.length === 0) {
+                            err = `нет постов за ${POSTS_WINDOW_DAYS} дней`;
+                        } else {
+                            // Целевая метрика — суточный поток комментариев: сумма
+                            // комментариев под всеми постами окна, делённая на длину
+                            // окна. От частоты постинга не зависит.
+                            const sum = posts.reduce((s, p) => s + p.comments, 0);
+                            postsCount = String(posts.length);
+                            total = String(sum);
+                            perDay = (sum / POSTS_WINDOW_DAYS).toFixed(1);
+                        }
                     }
 
                     row = [
                         key,
                         handle.title,
                         gate.subscribers != null ? String(gate.subscribers) : "",
-                        p50, p90, msgs, err,
+                        postsCount, total, perDay, err,
                     ];
                 }
             } catch (err: any) {
@@ -358,7 +397,7 @@ async function runFromInput(agentId: string, inputPath: string, outputPath: stri
             fs.appendFileSync(outputPath, csvRow(row));
             processed.add(key);
             done++;
-            log.info(`[channel-activity-update] ${key} — ${row[6] ? `error: ${row[6]}` : `p50=${row[3]} p90=${row[4]} msgs=${row[5]}`}`);
+            log.info(`[channel-activity-update] ${key} — ${row[6] ? `error: ${row[6]}` : `постов=${row[3]} всего_комм=${row[4]} комм_в_день=${row[5]}`}`);
             await sleepRandom(INTER_CHANNEL_MIN_SEC, INTER_CHANNEL_MAX_SEC);
         }
     } finally {

@@ -1,0 +1,26 @@
+# Суточный свип авто-реавторизации агентов с ограничением need_update_session
+# (auto-reauth-sweep): берёт всех агентов с need_update_session из общей
+# agent_restrictions и реавторизует каждого через его tdata-сессию (reauthFromTdata).
+# Успех — ограничение снято; нет tdata / не подошёл 2FA — уводит в manual_reauth;
+# ошибка-бан — в banned; транзиентные — оставляет на ретрай след. прогоном.
+# Oneshot, запускается таймером tg-reauth-sweep.timer раз в день. Трогает Telegram
+# (MTProto через прокси агента), наблюдаемость — только journal.
+
+[Unit]
+Description=Telegram auto-reauth sweep (need_update_session -> reauth via tdata)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw-plugins/telegram-user-tool
+ExecStart=/root/openclaw-plugins/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/reauth-sweep.ts --admin agent1
+EnvironmentFile=-/root/.openclaw/codex-auth/.env
+EnvironmentFile=-/root/.openclaw/secrets.env
+Slice=tg-agents.slice
+# Свип последователен по агентам, каждая реавторизация ждёт код авторизации (минуты);
+# запас на пачку застрявших агентов. Отдельная реавторизация ограничена внутренним
+# таймаутом reauthFromTdata, бесконечно висеть не может.
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal

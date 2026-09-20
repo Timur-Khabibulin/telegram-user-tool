@@ -34,8 +34,8 @@ https://t.me/bar,Канал Bar,agent8
 
 1. Залить входной CSV на VPS:
    ```
-   ssh -i ~/.ssh/vps_key root@<VPS_HOST> "mkdir -p ~/.openclaw/extensions/telegram-user-tool/imports"
-   scp -i ~/.ssh/vps_key <локальный путь к CSV> root@<VPS_HOST>:~/.openclaw/extensions/telegram-user-tool/imports/<имя>-input.csv
+   ssh -i ~/.ssh/vps_key root@<VPS_HOST> "mkdir -p ~/openclaw-plugins/telegram-user-tool/imports"
+   scp -i ~/.ssh/vps_key <локальный путь к CSV> root@<VPS_HOST>:~/openclaw-plugins/telegram-user-tool/imports/<имя>-input.csv
    ```
 
 2. Запустить скрипт. Список на десятки ссылок — можно синхронно; на сотни (пейсинг
@@ -43,7 +43,7 @@ https://t.me/bar,Канал Bar,agent8
    нескольких минут до часа+, запускать в фоне (`nohup ... & disown`), чтобы не
    держать интерактивную SSH-сессию:
    ```
-   ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/.openclaw/extensions/telegram-user-tool && \
+   ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/openclaw-plugins/telegram-user-tool && \
      nohup ./node_modules/.bin/tsx src/scripts/ops/channel-metrics.ts \
        --input imports/<имя>-input.csv \
        --output imports/<имя>-output.csv \
@@ -52,12 +52,12 @@ https://t.me/bar,Канал Bar,agent8
 
 3. Проверить прогресс (лог пишется построчно, одна строка на канал):
    ```
-   ssh -i ~/.ssh/vps_key root@<VPS_HOST> "tail -20 ~/.openclaw/extensions/telegram-user-tool/imports/<имя>.log"
+   ssh -i ~/.ssh/vps_key root@<VPS_HOST> "tail -20 ~/openclaw-plugins/telegram-user-tool/imports/<имя>.log"
    ```
 
 4. Скачать результат, когда прогон завершён (в логе строка `[channel-metrics] done`):
    ```
-   scp -i ~/.ssh/vps_key root@<VPS_HOST>:~/.openclaw/extensions/telegram-user-tool/imports/<имя>-output.csv <локальный путь>
+   scp -i ~/.ssh/vps_key root@<VPS_HOST>:~/openclaw-plugins/telegram-user-tool/imports/<имя>-output.csv <локальный путь>
    ```
 
 5. Убрать временные файлы на сервере после того, как результат скачан и больше не

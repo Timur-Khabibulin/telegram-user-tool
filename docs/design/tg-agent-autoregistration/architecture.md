@@ -167,7 +167,7 @@ const stringSession = convertToGramjsSession(data)        // готово для
 | `TData` | `src/core/tdata/` (новый) | `@mtcute/convert` (раздел 2.1) + методы аккаунта (раздел 2.3) + очистка предыдущего состояния (раздел 2.4) — этой логики сейчас нет нигде в `src/core/telegram/service.ts`, пишется с нуля |
 | Подбор прокси | `src/scripts/ops/provision-proxy-for-new-agent.ts` (существующий, без изменений) | вызывается подпроцессом на каждую попытку (R-12) |
 | Стейджинг | `~/.openclaw/tg-agent-autoregistration/staging/agent<N>/` (R-7/R-D3) | `status.json` пишется через tmp-файл+`renameSync` (атомарно); на `done` — сначала полностью собирается (`tdata/`+`tg-account.json`+`SOUL.md`), затем один `renameSync(staging, workspace)` — атомарен на уровне ОС в пределах одной ФС |
-| Шаблоны персоны | `~/.openclaw/tg-agent-autoregistration/templates/<personName>/` (R-D1) | без изменений относительно требований |
+| Шаблоны персоны | `~/.openclaw/personas/<personName>/` (R-D1) | без изменений относительно требований |
 
 Деплой не меняется — `scp`+`chown`+`openclaw gateway restart`, как для остального
 Node/TS-кода. Единственная новая запись в `package.json` — `@mtcute/convert`

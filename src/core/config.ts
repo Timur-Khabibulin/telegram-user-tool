@@ -64,7 +64,13 @@ export function workspaceDir(agentId: string): string {
  */
 export function listAgentIds(): string[] {
     const base = path.join(os.homedir(), ".openclaw");
+    // Рабочие агенты именуются workspace-agent<N> (autoreg computeAgentIdRange;
+    // FUNNEL_ADMIN_AGENT_ID/REPORT_AGENT_ID тоже вида agent<N>). Сужение до префикса
+    // workspace-agent исключает пул пустых аккаунтов workspace-emptyAccount*
+    // (banned-account-replacement, R12 — их перечисляет listPoolAccountIds) и
+    // транзиентные каталоги замены (.incoming/.old), невидимые рабочему контуру.
     const prefix = "workspace-";
+    const agentPrefix = "workspace-agent";
     let entries: fs.Dirent[];
     try {
         entries = fs.readdirSync(base, { withFileTypes: true });
@@ -72,9 +78,38 @@ export function listAgentIds(): string[] {
         return [];
     }
     return entries
-        .filter((e) => e.isDirectory() && e.name.startsWith(prefix) && e.name.length > prefix.length)
+        .filter(
+            (e) =>
+                e.isDirectory() &&
+                e.name.startsWith(agentPrefix) &&
+                !e.name.endsWith(".incoming") &&
+                !e.name.endsWith(".old"),
+        )
         .map((e) => e.name.slice(prefix.length))
         .filter((agentId) => agentId !== REPORT_AGENT_ID);
+}
+
+/**
+ * Идентификаторы пул-аккаунтов для авто-замены забаненных
+ * (banned-account-replacement): каталоги ~/.openclaw/workspace-emptyAccount<N> с
+ * уже авторизованной сессией и папкой tdata/. Отдельно от listAgentIds — пул невидим
+ * рабочему контуру (R12). Карантинные каталоги с суффиксом `.invalid` (невалидный
+ * аккаунт, снятый с ротации, M2) исключаются. Возвращаемый id (напр. `emptyAccount3`)
+ * совместим с workspaceDir — `workspace-emptyAccount3`.
+ */
+export function listPoolAccountIds(): string[] {
+    const base = path.join(os.homedir(), ".openclaw");
+    const prefix = "workspace-";
+    const poolPrefix = "workspace-emptyAccount";
+    let entries: fs.Dirent[];
+    try {
+        entries = fs.readdirSync(base, { withFileTypes: true });
+    } catch {
+        return [];
+    }
+    return entries
+        .filter((e) => e.isDirectory() && e.name.startsWith(poolPrefix) && !e.name.endsWith(".invalid"))
+        .map((e) => e.name.slice(prefix.length));
 }
 
 export function accountConfigPath(agentId: string): string {
@@ -101,6 +136,27 @@ export function listUsedProxyUsernames(): Set<string> {
         }
     }
     return used;
+}
+
+/**
+ * Персоны всех агентов: Map<agentId, persona> (channel-multipersona). Best-effort
+ * обход конфигов — битый/недоступный конфиг одного агента пропускается и не
+ * роняет резолвинг остальных (тот же приём, что `listUsedProxyUsernames`). Агент
+ * без поля `persona` в карту не попадает. Вызывается один раз на прогон и
+ * передаётся вниз готовой картой — без чтений `tg-account.json` в циклах.
+ */
+export function buildPersonaIndex(): Map<string, string> {
+    const index = new Map<string, string>();
+    for (const agentId of listAgentIds()) {
+        try {
+            const raw = fs.readFileSync(accountConfigPath(agentId), "utf-8");
+            const cfg = JSON.parse(raw);
+            if (cfg?.persona) index.set(agentId, String(cfg.persona));
+        } catch {
+            // битый/отсутствующий конфиг — пропускаем, не блокируем остальных
+        }
+    }
+    return index;
 }
 
 export function channelsDbPath(agentId: string): string {
@@ -200,6 +256,16 @@ export function agentRestrictionsDbPath(adminAgentId: string): string {
 }
 
 /**
+ * Отложенные переходы жизненного цикла агента после авто-замены аккаунта
+ * (banned-account-replacement): одна БД на всю платформу, в workspace админ-агента —
+ * тот же приём, что agent-restrictions.db. Строки (agentId, action, run_at)
+ * посеваются при замене и исполняются суточным sweep’ом замены.
+ */
+export function lifecycleTransitionsDbPath(adminAgentId: string): string {
+    return path.join(workspaceDir(adminAgentId), "lifecycle-transitions.db");
+}
+
+/**
  * Хранилище прогонов распределения каналов через бот (channel-distribution).
  * Одна БД на всю платформу, лежит в workspace админ-агента — тот же приём, что
  * discovery.db/funnel.db: платформенные данные в одном месте.
@@ -209,12 +275,41 @@ export function distributionDbPath(adminAgentId: string): string {
 }
 
 /**
+ * Централизованный append-only журнал операций над каналами
+ * (channel-operations-history). Одна БД на всю платформу, лежит в workspace
+ * админ-агента — тот же приём, что discovery.db/channel-distribution.db.
+ * Отдельный файл (не таблицы в discovery.db): иной профиль записи (пишут
+ * мониторы всех агентов одновременно) и независимый жизненный цикл.
+ */
+export function channelOperationsDbPath(adminAgentId: string): string {
+    return path.join(workspaceDir(adminAgentId), "channel-operations.db");
+}
+
+/**
  * Каталог загруженных администратором CSV-файлов распределения (channel-distribution,
  * R26 — аудит). Лежит в workspace админ-агента, тот же приём, что reportsDir. Имена
  * файлов несут UTC-timestamp, поэтому прогоны не перезатирают друг друга.
  */
 export function distributionUploadsDir(adminAgentId: string): string {
     return path.join(workspaceDir(adminAgentId), "distribution-uploads");
+}
+
+/**
+ * БД задач конвейера метрик (channel-metrics-pipeline). Одна таблица на платформу
+ * в workspace админ-агента — тот же приём, что channel-distribution.db: уровень
+ * прогона (статус, прогресс, пути файлов), переживает рестарт слушателя.
+ */
+export function metricsPipelineDbPath(adminAgentId: string): string {
+    return path.join(workspaceDir(adminAgentId), "channel-metrics-pipeline.db");
+}
+
+/**
+ * Рабочий каталог конвейера метрик: загруженный вход, output-CSV расчёта (источник
+ * резюмируемости) и итоговый CSV прошедших фильтр. В workspace админ-агента, имена
+ * с UTC-timestamp — прогоны не перезатирают друг друга.
+ */
+export function metricsPipelineDir(adminAgentId: string): string {
+    return path.join(workspaceDir(adminAgentId), "channel-metrics-pipeline");
 }
 
 // ─── Конфигурация discovery (channel-discovery) ───────────────────────
@@ -248,6 +343,19 @@ export const TELEGRAM_REVIEW_CHAT_ID = process.env.TELEGRAM_REVIEW_CHAT_ID ?? nu
  */
 export const CHANNEL_DISTRIBUTION_BOT_TOKEN = process.env.CHANNEL_DISTRIBUTION_BOT_TOKEN ?? null;
 export const CHANNEL_DISTRIBUTION_CHAT_ID = process.env.CHANNEL_DISTRIBUTION_CHAT_ID ?? null;
+
+/**
+ * Доступ к Google-таблице для конвейера метрик (channel-metrics-pipeline):
+ * путь к JSON-ключу сервис-аккаунта, ID таблицы и имя листа. Тот же паттерн
+ * секретов, что CHANNEL_DISTRIBUTION_* и ASOCKS_API_KEY: из `~/.openclaw/secrets.env`,
+ * читается напрямую из `process.env`. Доступ к API — через JWT сервис-аккаунта
+ * (node:crypto), scope `spreadsheets`; таблица расшарена на email сервис-аккаунта
+ * как Редактор (см. docs/configuration.md и openspec change google-setup.md).
+ * Имя листа с дефолтом — единственная известная цель записи.
+ */
+export const GOOGLE_SHEETS_KEY_PATH = process.env.GOOGLE_SHEETS_KEY_PATH ?? null;
+export const CHANNELS_SHEET_ID = process.env.CHANNELS_SHEET_ID ?? null;
+export const CHANNELS_SHEET_NAME = process.env.CHANNELS_SHEET_NAME ?? "all-processed-channels";
 
 /**
  * География и язык поиска TGStat для RU-задачи (channels/search).

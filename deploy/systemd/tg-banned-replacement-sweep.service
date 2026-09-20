@@ -1,0 +1,28 @@
+# Суточный свип авто-замены забаненных аккаунтов из пула пустых
+# (banned-account-replacement): берёт всех агентов с активным ограничением banned
+# (вкл. заморозку) из общей agent_restrictions и подставляет вместо каждого пустой
+# аккаунт из пула (workspace-emptyAccount*), сохраняя agentId и персону. Тот же
+# прогон исполняет назревшие отложенные переходы жизненного цикла (старт join-queue
+# на T0+1д; monitor-v5 on и warmup off на T0+3д).
+# Oneshot, запускается таймером tg-banned-replacement-sweep.timer раз в день. Трогает
+# Telegram (MTProto через прокси), наблюдаемость — journal + алерт «пул пуст» в
+# Saved Messages report-агента.
+
+[Unit]
+Description=Telegram banned-account replacement sweep (banned -> replace from pool)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw-plugins/telegram-user-tool
+ExecStart=/root/openclaw-plugins/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/banned-replacement-sweep.ts --admin agent1
+EnvironmentFile=-/root/.openclaw/codex-auth/.env
+EnvironmentFile=-/root/.openclaw/secrets.env
+Slice=tg-agents.slice
+# Свип последователен по агентам; каждая замена включает валидацию пул-аккаунта и
+# настройку под персону (создание канала и т.п. через MTProto, минуты). Запас на
+# пачку забаненных агентов.
+TimeoutStartSec=3600
+StandardOutput=journal
+StandardError=journal

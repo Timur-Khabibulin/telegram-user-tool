@@ -16,8 +16,8 @@ import {
     purgeChannelData,
     type CleanupChannelRow,
 } from "../core/db/channels";
-import { normalizeChannelLink, deleteDiscoveredChannel } from "../core/db/discovery";
-import { FUNNEL_ADMIN_AGENT_ID } from "../core/config";
+import { normalizeChannelLink, removeAssignment } from "../core/db/discovery";
+import { FUNNEL_ADMIN_AGENT_ID, buildPersonaIndex } from "../core/config";
 
 // ─── Типы ─────────────────────────────────────────────────────────────
 
@@ -72,6 +72,9 @@ export async function runChannelCleanup(
     log: Logger,
 ): Promise<ChannelCleanupResult> {
     const results: AgentResult[] = [];
+    // Персона очищаемого агента: снимаем только её закрепление канала, не трогая
+    // тот же канал в других персонах (R7). Строится один раз на прогон.
+    const personaIndex = buildPersonaIndex();
 
     for (const agentId of params.agents) {
         try {
@@ -111,9 +114,10 @@ export async function runChannelCleanup(
 
                     purgeChannelData(agentId, ch.chatId, log);
 
-                    if (ch.channelResolved === 1 && ch.channelUsername) {
+                    const persona = personaIndex.get(agentId);
+                    if (ch.channelResolved === 1 && ch.channelUsername && persona) {
                         const canonical = normalizeChannelLink(ch.channelUsername);
-                        deleteDiscoveredChannel(FUNNEL_ADMIN_AGENT_ID, canonical);
+                        removeAssignment(FUNNEL_ADMIN_AGENT_ID, persona, canonical);
                     } else {
                         agentResult.discoverySkipped += 1;
                     }

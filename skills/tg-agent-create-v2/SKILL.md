@@ -60,7 +60,7 @@ description: "DEPRECATED — use tg-agent-autoregistration instead. Full setup s
 ### Вариант B — выбор из списка
 
 ```bash
-cd ~/.openclaw/extensions/telegram-user-tool && ./node_modules/.bin/tsx \
+cd ~/openclaw-plugins/telegram-user-tool && ./node_modules/.bin/tsx \
   src/scripts/ops/provision-proxy-for-new-agent.ts --list-countries
 ```
 
@@ -87,7 +87,7 @@ cd ~/.openclaw/extensions/telegram-user-tool && ./node_modules/.bin/tsx \
 Вызвать:
 
 ```bash
-cd ~/.openclaw/extensions/telegram-user-tool && ./node_modules/.bin/tsx \
+cd ~/openclaw-plugins/telegram-user-tool && ./node_modules/.bin/tsx \
   src/scripts/ops/provision-proxy-for-new-agent.ts \
   --create-candidate \
   --agent-id <agentName> \

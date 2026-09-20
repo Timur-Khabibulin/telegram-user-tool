@@ -8,6 +8,9 @@
 // отбрасывается здесь же, до вызывающего кода. sendDistributionMessage не
 // принимает chatId — всегда шлёт в тот же уполномоченный чат.
 
+import * as fs from "fs";
+import * as path from "path";
+
 import { CHANNEL_DISTRIBUTION_BOT_TOKEN, CHANNEL_DISTRIBUTION_CHAT_ID } from "./config";
 import type { Logger } from "./logger";
 
@@ -60,6 +63,28 @@ async function callBotApi<T>(method: string, body: Record<string, unknown>, log:
 export async function sendDistributionMessage(text: string, log: Logger): Promise<void> {
     const { chatId } = requireConfig();
     await callBotApi("sendMessage", { chat_id: chatId, text }, log);
+}
+
+/**
+ * Отправляет файл (итоговый CSV конвейера метрик) в уполномоченный чат. Multipart
+ * через глобальные FormData/Blob (Node 18+), а не JSON — sendDocument требует
+ * загрузки тела файла. URL несёт токен, поэтому целиком не логируется (как
+ * callBotApi).
+ */
+export async function sendDistributionDocument(filePath: string, caption: string, log: Logger): Promise<void> {
+    const { token, chatId } = requireConfig();
+    const buf = fs.readFileSync(filePath);
+    const form = new FormData();
+    form.append("chat_id", chatId);
+    if (caption.length > 0) form.append("caption", caption);
+    form.append("document", new Blob([new Uint8Array(buf)]), path.basename(filePath));
+
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: "POST", body: form });
+    const json: { ok?: boolean; description?: string } | null = await res.json().catch(() => null);
+    log.info(`[distribution-bot-api] sendDocument — status=${res.status} ok=${json?.ok ?? false}`);
+    if (!res.ok || !json?.ok) {
+        throw new Error(`Bot API sendDocument failed: status=${res.status} description=${json?.description ?? "unknown"}`);
+    }
 }
 
 /**

@@ -21,8 +21,11 @@ import { loadAccountConfig, FUNNEL_ADMIN_AGENT_ID, V5_SYNC_PAGE_SIZE, V5_SYNC_PA
 import { upsertRestriction, type RestrictionType } from "../db/agent-restrictions";
 import { GramJsBridgeLogger } from "./gramjs-logger";
 import { loadPersonaTemplate } from "../../features/tg-agent-autoregistration/persona-template";
+import { provisionProxyViaProbe } from "../../features/proxy/provision-via-probe";
+import { parseProxyCountry } from "../../features/proxy/provision-shared";
 import { createPersonaChannel } from "../tdata/account-setup";
 import { acquireSession, releaseSession } from "./session-lock";
+import type { SelfParticipantState } from "../write-access";
 export { FloodWaitError, ClientNotConnectedError, MissingAccountConfigError, ConnectTimeoutError, SessionRevokedError, AccountBannedError } from "./errors";
 import { FloodWaitError, ClientNotConnectedError, MissingAccountConfigError, ConnectTimeoutError, SessionRevokedError, AccountBannedError, parseFloodWait, classifyAccountError, classifyTelegramErrorTag, retryOnFloodWait } from "./errors";
 
@@ -72,6 +75,13 @@ export interface JoinedChannelIdentity {
     channelId: string;
     channelAccessHash: string;
     channelUsername: string | null;
+    /**
+     * channel-write-access (§4.1): постоянная величина права записи группы
+     * обсуждения — `default_banned_rights.send_messages` (true = запрещено всем
+     * рядовым участникам). Берётся из уже сделанного `GetFullChannel`, без
+     * дополнительного вызова. `join-queue` классифицирует её в `write_access_reason`.
+     */
+    defaultBannedSendMessages: boolean;
 }
 
 export interface JoinResult {
@@ -302,7 +312,7 @@ export class TelegramService {
 
     private async ensureClient(override?: EnsureClientOverride): Promise<TelegramClient> {
         const account = this.resolveAccountConfig();
-        const proxy = override ? override.proxy : account.proxy;
+        let proxy = override ? override.proxy : account.proxy;
         const key = this.clientKey(account.accountId);
 
         if (!override) {
@@ -338,6 +348,46 @@ export class TelegramService {
         if (!account.sessionString) {
             this.log.error("[telegram-user-tool] ensureClient — missing sessionString");
             throw new MissingAccountConfigError("sessionString");
+        }
+
+        // guaranteed-proxy-on-connect: перед боевым входом проверяем текущий прокси
+        // probe'ом (probeProxy — MTProto-хендшейк к Telegram DC пустой сессией, без входа
+        // в аккаунт и без tdata), 2 попытки × 10с. Только на нормальном пути (не override:
+        // там вызывающий сам управляет прокси) и когда прокси задан. Провал обеих попыток →
+        // подбор рабочего прокси (до 10 кандидатов, verify тем же probe); успех — swap в
+        // tg-account.json и используем новый прокси для боевого connect ниже. Исчерпание/
+        // нет ключа/страны → отпускаем лок и бросаем: прогон завершается ошибкой, как при
+        // обычном неуспехе подключения. Подбор триггерит ТОЛЬКО провал probe — не провал
+        // боевого connect (бюджеты раздельны: боевой цикл ниже сохраняет свои 3×60с).
+        if (!override && lockAgentId && proxy) {
+            const probeOne = (p: ProxyConfig) =>
+                this.probeProxy({ apiId: account.apiId, apiHash: account.apiHash, proxy: p, maxAttempts: 2, connectTimeoutMs: 10_000 });
+            let probeOk = true;
+            try {
+                await probeOne(proxy);
+            } catch (err: any) {
+                probeOk = false;
+                this.log.warn(
+                    `[telegram-user-tool] ensureClient — probe текущего прокси ${proxy.host}:${proxy.port} провален: ${err?.message ?? err}; подбор нового`,
+                );
+            }
+            if (!probeOk) {
+                const country = parseProxyCountry(proxy.username, proxy.countryCode);
+                const replacement = country
+                    ? await provisionProxyViaProbe(lockAgentId, country, 10, probeOne, this.log)
+                    : null;
+                if (!replacement) {
+                    if (!country) {
+                        this.log.error(`[telegram-user-tool] ensureClient — ${lockAgentId}: страну прокси определить нельзя, подбор невозможен`);
+                    }
+                    // Подключиться не удалось — отпускаем лок (тот же приём и пауза, что при
+                    // исчерпании попыток коннекта), иначе агент остался бы занятым.
+                    await sleep(randomDelayMs(POST_DISCONNECT_DELAY_MIN_SEC, POST_DISCONNECT_DELAY_MAX_SEC));
+                    this.releaseFor(key, lockAgentId);
+                    throw new ConnectTimeoutError(10_000, 10, 10, proxy);
+                }
+                proxy = replacement;
+            }
         }
 
         const MAX_ATTEMPTS = override?.maxAttempts ?? 3;
@@ -376,7 +426,14 @@ export class TelegramService {
                     this.clients.set(key, client);
                     if (lockAgentId) this.agentIdByKey.set(key, lockAgentId);
                 }
-                const me = await client.getMe();
+                // getMe тоже под таймаутом: connect может подняться, а getMe — зависнуть
+                // на полуоткрытом MTProto-сокете (ответ не приходит), и без границы это
+                // подвешивает весь прогон навсегда (funnel-tracker завис на 8ч, agent199).
+                // Срабатывание ловит тот же catch цикла попыток → ретрай/ConnectTimeoutError.
+                const getMeTimeout = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error(`getMe timed out after ${CONNECT_TIMEOUT_MS / 1000}s`)), CONNECT_TIMEOUT_MS),
+                );
+                const me = await Promise.race([client.getMe(), getMeTimeout]);
                 this.log.info(
                     `[telegram-user-tool] ensureClient — connected as ${(me as any).firstName ?? ""} ${(me as any).lastName ?? ""} (ID: ${me.id})`,
                 );
@@ -522,6 +579,32 @@ export class TelegramService {
             await sleep(randomDelayMs(POST_DISCONNECT_DELAY_MIN_SEC, POST_DISCONNECT_DELAY_MAX_SEC));
             this.releaseFor(key);
         }
+    }
+
+    /**
+     * Пер-агентный teardown для циклов-обходов, где один процесс подряд работает
+     * с многими агентами (funnel-tracker): рвёт соединение ИМЕННО этого агента
+     * сразу после работы с ним, держит ту же паузу перед снятием замка, что и
+     * disconnect() (защита от AUTH_KEY_DUPLICATED — сервер Telegram убирает запись
+     * о подключении не мгновенно), и отпускает сессию. В отличие от disconnect(),
+     * не закрывает клиентов других агентов из мапы (например REPORT_AGENT_ID,
+     * который переиспользуется для отправки отчёта в конце прогона).
+     *
+     * Защита: действует, только если именно `agentId` сейчас загружен (loadAccount
+     * ставит agentId и accountConfig вместе). Если агент был пропущен без
+     * подключения (ограничение) или loadAccount не дошёл — this.agentId укажет на
+     * другого агента, и метод станет no-op, не тронув чужой клиент. Idempotent:
+     * нет живого клиента для текущего аккаунта — тоже no-op.
+     */
+    async disconnectAgent(agentId: string): Promise<void> {
+        if (this.agentId !== agentId || !this.accountConfig) return;
+        const key = this.clientKey(this.accountConfig.accountId);
+        const client = this.clients.get(key);
+        if (!client) return;
+        await client.disconnect().catch(() => {});
+        this.clients.delete(key);
+        await sleep(randomDelayMs(POST_DISCONNECT_DELAY_MIN_SEC, POST_DISCONNECT_DELAY_MAX_SEC));
+        this.releaseFor(key);
     }
 
     /**
@@ -1442,6 +1525,9 @@ export class TelegramService {
                     channelId: channel.id.toString(),
                     channelAccessHash: channel.accessHash!.toString(),
                     channelUsername: channel.username ?? username,
+                    // Постоянная величина права записи группы обсуждения (channel-write-access,
+                    // §4.1) — из уже полученного объекта discussionChat, без доп. вызова.
+                    defaultBannedSendMessages: discussionChat.defaultBannedRights?.sendMessages === true,
                 };
                 results.push({ link, status: "joined", discussionChatId, identity });
                 this.log.info(`[telegram-user-tool] join — joined discussion group ${discussionChatId} for channel @${username}`);
@@ -1530,20 +1616,54 @@ export class TelegramService {
         };
     }
 
-    /** DEBUG-temp: права участника (self) в канале + restrictionReason канала. */
-    async debugCheckAdmin(channel: Api.InputChannel): Promise<string> {
+    /**
+     * Выполняет операцию на подключённом клиенте активного аккаунта (loadAccount).
+     * Узкий доступ к клиенту без публичного геттера — для операций, живущих вне
+     * сервиса (например, createPersonaChannel из core/tdata в tg-agent-channel-setup).
+     * Замок сессии и (dis)connect — на вызывающем (loadAccount + disconnect), как у
+     * прочих методов сервиса.
+     */
+    async withActiveClient<T>(fn: (client: TelegramClient) => Promise<T>): Promise<T> {
         const client = await this.requireClient();
-        const participant = await client.invoke(
-            new Api.channels.GetParticipant({ channel, participant: new Api.InputPeerSelf() }),
-        );
-        const full = await client.invoke(new Api.channels.GetFullChannel({ channel }));
-        const chat = (full.chats as any[]).find((c) => c instanceof Api.Channel) as any;
-        return JSON.stringify({
-            participant: participant.participant,
-            chatRestricted: chat?.restricted,
-            restrictionReason: chat?.restrictionReason,
-            banned: chat?.banned,
-        }, (_k, v) => typeof v === "bigint" ? v.toString() : v, 2);
+        return fn(client);
+    }
+
+    /**
+     * Живой статус участника (self) в группе обсуждения (channel-write-access, §3.1) —
+     * переменная величина права записи перед фазой отправок. `InputChannel` строится из
+     * peerCache (засеян `getDialogsForBatch` в текущем прогоне монитора), как в
+     * `leaveChannel`/`replyToMessage`, без getEntity. Дискриминированный результат:
+     * `USER_NOT_PARTICIPANT` и `USER_BANNED_IN_CHANNEL` приходят ОШИБКОЙ вызова (а не
+     * объектом участника) — нормализуются в отдельные kind'ы. Постоянная величина
+     * (`default_banned_rights.send_messages`) берётся из `chats` того же ответа и
+     * уточняет can_write без отдельного вызова. Аккаунтные/флуд-ошибки пробрасываются.
+     */
+    async getSelfParticipant(chatId: string): Promise<SelfParticipantState> {
+        const client = await this.requireClient();
+        const peer = this.peerCache.get(chatId);
+        if (!(peer instanceof Api.InputPeerChannel)) {
+            throw new Error(`No channel InputPeer cached for chatId=${chatId}. Call telegram_get_dialogs first.`);
+        }
+        const channel = new Api.InputChannel({ channelId: peer.channelId, accessHash: peer.accessHash });
+        try {
+            const res = await this.invokeChecked(() =>
+                client.invoke(new Api.channels.GetParticipant({ channel, participant: new Api.InputPeerSelf() })),
+            );
+            const discussionChat = (res.chats as any[]).find(
+                (c) => c instanceof Api.Channel && c.id?.toString() === peer.channelId.toString(),
+            ) as Api.Channel | undefined;
+            return {
+                kind: "participant",
+                participant: res.participant,
+                defaultBannedSendMessages: discussionChat?.defaultBannedRights?.sendMessages === true,
+            };
+        } catch (err: any) {
+            if (err instanceof ClientNotConnectedError) throw err;
+            const msg: string = err?.errorMessage ?? err?.message ?? String(err);
+            if (msg.includes("USER_NOT_PARTICIPANT")) return { kind: "not_participant" };
+            if (msg.includes("USER_BANNED_IN_CHANNEL")) return { kind: "banned_in_channel" };
+            throw err;
+        }
     }
 
     /** Есть ли у собственного аккаунта фото профиля (диагностика, agent-avatar-check). */
@@ -1907,6 +2027,61 @@ export class TelegramService {
     }
 
     /**
+     * Посты канала новее `sinceSec` — постранично от свежих к старым (`offsetId`),
+     * мелкими случайными порциями с паузой между ними (имитация листания ленты,
+     * против «машинного» обхода и лимитов). Останавливается, когда встречает пост
+     * старше `sinceSec`, либо по предохранителям `maxRequests`/`maxPosts`. Каждый
+     * `ChannelPost` несёт `.comments` — метрика режима списка channel-activity-update
+     * (comments_per_day). Восстановлен после утери исходной реализации при
+     * рассинхроне деплоя (незакоммиченная версия на VPS была затёрта).
+     */
+    async getPostsSince(
+        channel: Api.InputChannel,
+        sinceSec: number,
+        opts: { maxRequests: number; maxPosts: number; pageSize: () => number; pageDelayMs: () => number },
+    ): Promise<ChannelPost[]> {
+        const client = await this.requireClient();
+        const peer = new Api.InputPeerChannel({
+            channelId: channel.channelId,
+            accessHash: channel.accessHash,
+        });
+
+        const posts: ChannelPost[] = [];
+        let offsetId = 0;
+        let requests = 0;
+        while (requests < opts.maxRequests && posts.length < opts.maxPosts) {
+            const limit = Math.max(1, opts.pageSize());
+            let messages: any[];
+            try {
+                messages = await this.invokeChecked(() => client.getMessages(peer, { limit, offsetId }));
+            } catch (err: any) {
+                const wait = parseFloodWait(err);
+                if (wait !== null) throw new FloodWaitError(wait);
+                throw err;
+            }
+            requests++;
+            if (messages.length === 0) break; // конец истории
+
+            let reachedOld = false;
+            for (const m of messages as any[]) {
+                const post = mapMessageToPost(m);
+                if (!post) continue;
+                offsetId = post.id; // следующая страница — старше этого
+                if (post.date && post.date < sinceSec) {
+                    reachedOld = true;
+                    break;
+                }
+                posts.push(post);
+                if (posts.length >= opts.maxPosts) break;
+            }
+            if (reachedOld) break;
+
+            await sleep(opts.pageDelayMs());
+        }
+        return posts;
+    }
+
+    /**
      * Корневое сообщение ветки обсуждения канала по id поста в его собственной
      * нумерации (channel-post-watch) — резолвит служебную копию поста в чате
      * обсуждения через `messages.getDiscussionMessage`, БЕЗ вступления в сам
@@ -2230,13 +2405,17 @@ export class TelegramService {
                 await client.invoke(new Api.channels.EditTitle({ channel: personal.inputChannel, title: correctTitle }));
             }
 
-            const template = loadPersonaTemplate(personName);
+            const template = loadPersonaTemplate(personName, true);
+            const { postText, channelPostPhotoPath } = template;
+            if (postText == null || channelPostPhotoPath == null) {
+                return { ok: false, reason: `персона "${personName}" без канальных файлов (post.txt/channel_post_photo)` };
+            }
             const LINK_LINE = /^https?:\/\/\S+$/;
-            const kept = template.postText.split("\n").filter((line) => !LINK_LINE.test(line.trim()));
+            const kept = postText.split("\n").filter((line) => !LINK_LINE.test(line.trim()));
             const base = kept.join("\n").replace(/\s+$/u, "");
             const newText = `${base}\n${inviteLink}\n${inviteLink}\n${inviteLink}`;
 
-            await client.sendFile(personal.inputChannel, { file: template.channelPostPhotoPath, caption: newText });
+            await client.sendFile(personal.inputChannel, { file: channelPostPhotoPath, caption: newText });
             this.log.info(`[telegram-user-tool] fixChannelTitleAndRepost — title fixed + new post published`);
             return { ok: true };
         } catch (err: any) {
@@ -2257,7 +2436,7 @@ export class TelegramService {
         const client = await this.requireClient();
         let template;
         try {
-            template = loadPersonaTemplate(personName);
+            template = loadPersonaTemplate(personName, true);
         } catch (err: any) {
             return { ok: false, reason: err?.message ?? String(err) };
         }
@@ -2309,10 +2488,10 @@ export class TelegramService {
      * что `ensureClient` (см. `ConnectTimeoutError`/`SessionRevokedError`), не пишет и не
      * читает `AccountConfig` — вызывающий сам управляет циклом create/probe/delete кандидатов.
      */
-    async probeProxy(params: { apiId: number; apiHash: string; proxy: ProxyConfig }): Promise<void> {
+    async probeProxy(params: { apiId: number; apiHash: string; proxy: ProxyConfig; maxAttempts?: number; connectTimeoutMs?: number }): Promise<void> {
         const { apiId, apiHash, proxy } = params;
-        const MAX_ATTEMPTS = 3;
-        const CONNECT_TIMEOUT_MS = 20_000;
+        const MAX_ATTEMPTS = params.maxAttempts ?? 3;
+        const CONNECT_TIMEOUT_MS = params.connectTimeoutMs ?? 20_000;
         this.log.info(
             `[telegram-user-tool] probeProxy — checking proxy ${proxy.host}:${proxy.port} (${MAX_ATTEMPTS} attempts, ${CONNECT_TIMEOUT_MS / 1000}s timeout each)`,
         );

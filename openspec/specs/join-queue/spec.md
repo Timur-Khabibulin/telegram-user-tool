@@ -140,3 +140,24 @@ FLOOD_WAIT/SLOWMODE_WAIT» капабилити `group-monitoring`). Если п
 - **WHEN** попытка вступления вернула `USER_ALREADY_PARTICIPANT`, и строка `channels` существует со `status = 'not_found'`
 - **THEN** `status` сбрасывается в `null`, identity освежается, `join_queue.status='joined'`
 
+### Requirement: Захват постоянной величины права при вступлении
+
+При успешном вступлении в канал `join-queue` SHALL разово фиксировать постоянную
+величину права записи из `default_banned_rights` группы обсуждения, используя уже
+выполняемый вызов `GetFullChannel` (без дополнительного обращения к Telegram). Если
+запись запрещена всем рядовым участникам, SHALL фиксироваться причина
+`members_restricted`.
+
+#### Scenario: Вступили в канал с закрытой для участников записью
+
+- **WHEN** вступление успешно и `default_banned_rights.send_messages=true` у группы
+  обсуждения
+- **THEN** для канала фиксируется признак «писать нельзя» с причиной
+  `members_restricted`
+
+#### Scenario: Вступили в канал с открытой записью
+
+- **WHEN** вступление успешно и `default_banned_rights` разрешает запись рядовым
+  участникам
+- **THEN** признак «писать нельзя» по постоянной величине не ставится
+

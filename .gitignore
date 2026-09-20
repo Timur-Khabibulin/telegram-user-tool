@@ -18,3 +18,5 @@ local.properties
 .DS_Store
 *.session
 key.txt
+google_sheets_key.json
+*.key.json

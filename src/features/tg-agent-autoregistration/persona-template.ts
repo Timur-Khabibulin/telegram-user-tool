@@ -43,14 +43,17 @@ export interface ProfileData {
 
 export interface PersonaTemplate {
     personName: string;
-    postText: string;
+    /** Канальные поля (post/channel_photo/channel_post_photo) — null, если шаблон
+     *  загружен без requireChannel (mode A, канал не создаётся). */
+    postText: string | null;
     /** Все photo_profile_N по возрастанию номера (R-5 — грузятся все, не только первое). */
     photoProfilePaths: string[];
-    channelPhotoPath: string;
-    channelPostPhotoPath: string;
+    channelPhotoPath: string | null;
+    channelPostPhotoPath: string | null;
     defaultAgentData: DefaultAgentData;
     profileData: ProfileData;
-    soulMdPath: string;
+    /** SOUL.md больше не обязателен (в реге не используется) — null, если файла нет. */
+    soulMdPath: string | null;
 }
 
 function requireFile(dir: string, name: string): string {
@@ -78,6 +81,19 @@ function requireFileWithAnyExtension(dir: string, baseName: string): string {
     return path.join(dir, match);
 }
 
+/** Как requireFile, но возвращает null вместо ошибки, если файла нет (опциональные файлы mode A). */
+function optionalFile(dir: string, name: string): string | null {
+    const p = path.join(dir, name);
+    return fs.existsSync(p) ? p : null;
+}
+
+/** Как requireFileWithAnyExtension, но null вместо ошибки, если файла нет. */
+function optionalFileWithAnyExtension(dir: string, baseName: string): string | null {
+    const pattern = new RegExp(`^${baseName}\\.\\w+$`);
+    const match = fs.readdirSync(dir).filter((f) => pattern.test(f)).sort()[0];
+    return match ? path.join(dir, match) : null;
+}
+
 /** photo_profile_1.jpg, photo_profile_2.png, ... — сортировка по номеру, не по алфавиту имени файла. */
 function listProfilePhotos(dir: string): string[] {
     return fs
@@ -87,18 +103,31 @@ function listProfilePhotos(dir: string): string[] {
         .map((f) => path.join(dir, f));
 }
 
-export function loadPersonaTemplate(personName: string): PersonaTemplate {
+/**
+ * @param requireChannel — если true, канальные файлы (`post.txt`, `channel_photo.*`,
+ *   `channel_post_photo.*`) и `channelName` обязательны (mode B / создание канала).
+ *   Если false (mode A — рега без канала, createPublicChannel=false), они опциональны:
+ *   канал не создаётся, эти файлы не нужны. `SOUL.md` не обязателен в обоих режимах
+ *   (в реге не используется).
+ */
+export function loadPersonaTemplate(personName: string, requireChannel: boolean): PersonaTemplate {
     const dir = templatesDir(personName);
     if (!fs.existsSync(dir)) {
         throw new PersonaTemplateError(`шаблон персоны "${personName}" не найден: ${dir}`);
     }
 
-    const postTextPath = requireFile(dir, "post.txt");
-    const channelPhotoPath = requireFileWithAnyExtension(dir, "channel_photo");
-    const channelPostPhotoPath = requireFileWithAnyExtension(dir, "channel_post_photo");
+    // Канальные файлы — обязательны только при создании канала (requireChannel).
+    const postTextPath = requireChannel ? requireFile(dir, "post.txt") : optionalFile(dir, "post.txt");
+    const channelPhotoPath = requireChannel
+        ? requireFileWithAnyExtension(dir, "channel_photo")
+        : optionalFileWithAnyExtension(dir, "channel_photo");
+    const channelPostPhotoPath = requireChannel
+        ? requireFileWithAnyExtension(dir, "channel_post_photo")
+        : optionalFileWithAnyExtension(dir, "channel_post_photo");
+
     const defaultAgentDataPath = requireFile(dir, "default_agent_data.json");
     const profileDataPath = requireFile(dir, "profile_data.json");
-    const soulMdPath = requireFile(dir, "SOUL.md");
+    const soulMdPath = optionalFile(dir, "SOUL.md");
 
     const photoProfilePaths = listProfilePhotos(dir);
     if (photoProfilePaths.length === 0) {
@@ -112,16 +141,17 @@ export function loadPersonaTemplate(personName: string): PersonaTemplate {
         );
     }
 
+    // channelName нужен только для создания канала (requireChannel).
     const profileData = JSON.parse(fs.readFileSync(profileDataPath, "utf-8")) as ProfileData;
-    if (!profileData.name || !profileData.nick || !profileData.birthdate || !profileData.channelName) {
+    if (!profileData.name || !profileData.nick || !profileData.birthdate || (requireChannel && !profileData.channelName)) {
         throw new PersonaTemplateError(
-            `шаблон персоны "${personName}": profile_data.json неполон (нужны name, nick, birthdate, channelName)`,
+            `шаблон персоны "${personName}": profile_data.json неполон (нужны name, nick, birthdate${requireChannel ? ", channelName" : ""})`,
         );
     }
 
     return {
         personName,
-        postText: fs.readFileSync(postTextPath, "utf-8"),
+        postText: postTextPath ? fs.readFileSync(postTextPath, "utf-8") : null,
         photoProfilePaths,
         channelPhotoPath,
         channelPostPhotoPath,

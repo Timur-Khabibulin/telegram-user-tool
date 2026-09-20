@@ -156,11 +156,21 @@ export async function createPersonaChannel(
     accountUsername: string,
     log: Logger,
 ): Promise<void> {
+    // Канальные поля опциональны в типе (mode A их не грузит); здесь они обязаны
+    // быть — канал создаётся только когда шаблон загружен с requireChannel=true.
+    const { channelPhotoPath, channelPostPhotoPath, postText } = template;
+    const channelName = template.profileData.channelName;
+    if (!channelPhotoPath || !channelPostPhotoPath || postText == null || !channelName) {
+        throw new TdataSetupError(
+            "TEMPLATE_INCOMPLETE",
+            `у персоны "${template.personName}" нет канальных файлов (post.txt/channel_photo/channel_post_photo/channelName) — канал не создать`,
+        );
+    }
     try {
         const created = await client.invoke(
             new Api.channels.CreateChannel({
                 broadcast: true,
-                title: template.profileData.channelName,
+                title: channelName,
                 about: "",
             }),
         );
@@ -179,9 +189,9 @@ export async function createPersonaChannel(
 
         const avatarFile = await client.uploadFile({
             file: new CustomFile(
-                path.basename(template.channelPhotoPath),
-                fs.statSync(template.channelPhotoPath).size,
-                template.channelPhotoPath,
+                path.basename(channelPhotoPath),
+                fs.statSync(channelPhotoPath).size,
+                channelPhotoPath,
             ),
             workers: 1,
         });
@@ -194,7 +204,7 @@ export async function createPersonaChannel(
 
         // Пост — фото + текст (client.sendFile сам оборачивает InputMediaUploadedPhoto
         // и randomId, как уже используется для документов в core/telegram/service.ts).
-        await client.sendFile(inputChannel, { file: template.channelPostPhotoPath, caption: template.postText });
+        await client.sendFile(inputChannel, { file: channelPostPhotoPath, caption: postText });
 
         // Закрепление канала в профиле (R-6) — требует уже существующий
         // broadcast-канал с username (иначе PUBLIC_BROADCAST_EXPECTED), поэтому
@@ -225,11 +235,47 @@ export async function prepareAccount(
     currentPassword: string,
     username: string,
     log: Logger,
+    createPublicChannel: boolean,
 ): Promise<PrepareAccountResult> {
     await deleteExistingPhotos(client, log);
     await deleteAdminedPublicChannels(client, log);
     await change2FA(client, currentPassword, template.defaultAgentData["2fa"], log);
     await resetOtherSessions(client, log);
+    await applyProfile(client, username, template.profileData, log);
+    await uploadProfilePhotos(client, template.photoProfilePaths, log);
+    // Создание публичного канала — условно (mode A: без канала, mode B: как раньше).
+    // Отдельно канал можно создать позже тулом tg_agent_channel_setup.
+    if (createPublicChannel) {
+        await createPersonaChannel(client, template, username, log);
+    } else {
+        log.info("[tdata] prepareAccount — createPublicChannel=false, шаг канала персоны пропущен");
+    }
+
+    const me = await client.getMe();
+    return { telegramUserId: me.id.toString() };
+}
+
+/**
+ * Настройка аккаунта под персону при авто-замене забаненного
+ * (banned-account-replacement, R8/M3). Пул-аккаунты покупные — нужна полная
+ * настройка под персону, но БЕЗ смены 2FA (`change2FA`) и БЕЗ сброса чужих сессий
+ * (`resetOtherSessions`): то и другое сделано при первичном создании сессии пула.
+ * Bootstrap-часть (расшифровка tdata, логин, приём кода) не нужна — сессия уже
+ * готова, работаем сессией самого агента.
+ *
+ * Тело — `prepareAccount` минус `change2FA` и `resetOtherSessions`; переиспользует
+ * те же приватные хелперы этого файла. Публичный канал создаётся всегда (для
+ * замены mode без канала не нужен) — идемпотентность повторной активации после
+ * сбоя обеспечивает вызывающий (guard «канал уже есть» перед вызовом).
+ */
+export async function setupReplacementAccount(
+    client: TelegramClient,
+    template: PersonaTemplate,
+    username: string,
+    log: Logger,
+): Promise<PrepareAccountResult> {
+    await deleteExistingPhotos(client, log);
+    await deleteAdminedPublicChannels(client, log);
     await applyProfile(client, username, template.profileData, log);
     await uploadProfilePhotos(client, template.photoProfilePaths, log);
     await createPersonaChannel(client, template, username, log);

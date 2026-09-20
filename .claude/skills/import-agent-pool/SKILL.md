@@ -38,13 +38,13 @@ agent2;t.me/somechannel;
 
 1. Залить CSV на VPS:
    ```
-   scp -i ~/.ssh/vps_key <локальный путь к CSV> root@<VPS_HOST>:~/.openclaw/extensions/telegram-user-tool/imports/<имя>.csv
+   scp -i ~/.ssh/vps_key <локальный путь к CSV> root@<VPS_HOST>:~/openclaw-plugins/telegram-user-tool/imports/<имя>.csv
    ```
-   (создать `imports/` на сервере, если нет: `ssh ... "mkdir -p ~/.openclaw/extensions/telegram-user-tool/imports"`)
+   (создать `imports/` на сервере, если нет: `ssh ... "mkdir -p ~/openclaw-plugins/telegram-user-tool/imports"`)
 
 2. Прогнать импорт:
    ```
-   ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/.openclaw/extensions/telegram-user-tool && \
+   ssh -i ~/.ssh/vps_key root@<VPS_HOST> "cd ~/openclaw-plugins/telegram-user-tool && \
      ./node_modules/.bin/tsx src/scripts/ops/import-agent-pool.ts --file imports/<имя>.csv [--admin agent1]"
    ```
 

@@ -400,27 +400,45 @@ package "funnel.db  (admin-only)" #E0F7FA {
 ' ─────────────────────────────────────────────────────────────────────
 package "discovery.db  (admin-only)" #FFF0F0 {
 
-    entity "discovered_channels" as discovered {
+    entity "channels" as reg_channels {
         * canonical_link : TEXT <<PK>>
         --
-        assigned_agent : TEXT
         * added_at : INTEGER
-        banned_at : INTEGER
+        sub_count : REAL
+        avg_views : REAL
+        p50_user : REAL
+        p90_users : REAL
+        comments_per_day : REAL
+        metrics_json : TEXT
     }
 
+    entity "channel_assignments" as channel_assignments {
+        * persona : TEXT <<PK>>
+        * canonical_link : TEXT <<PK>> <<FK channels>>
+        --
+        agent_id : TEXT
+        * assigned_at : INTEGER
+    }
+
+    reg_channels ||..o{ channel_assignments : canonical_link
+
     note as N_discovery_db
-      <b>Назначение.</b> Реестр найденных каналов на всю платформу (только у админ-агента).
+      <b>Назначение.</b> Реестр найденных каналов на всю платформу (только у админ-агента),
+      мультиперсонность (channel-multipersona).
       ----
       <b>Таблицы</b>
-      • discovered_channels — дедуп по канонической ссылке (PK), назначение каналу агента
+      • channels — сущность канала: одна строка на канал, метрики канала («один факт —
+        один дом»); база под «полный список реестра без фильтра по персоне»
+      • channel_assignments — закрепление в разрезе персоны: PK (persona, canonical_link)
       ----
-      <b>Статусов нет.</b> Инвариант «один канал — один агент навсегда» держится на PK.
+      <b>Инвариант</b> «один канал — один агент В РАМКАХ ПЕРСОНЫ» держится на PK закрепления;
+      один канал может жить в N строках — по одной на персону.
       ----
-      <b>assigned_agent</b> · NULL = канал в пуле прогона сбора (discovery-similar-parallel v2);
-      фаза distribute заполняет. Исторические строки (до v2) — не NULL.
+      <b>agent_id</b> · NULL = пустой слот: канал принадлежит персоне, активного агента нет
+      (после бана до ротации, channel-rotation). Строка закрепления при этом сохраняется.
       ----
-      <b>banned_at</b> · NULL = активен, иначе unix-сек бана (leave-banned-channels).
-      assigned_agent при бане не меняется и строка не удаляется.
+      Старая таблица discovered_channels на время миграции сохраняется как резерв
+      (обратимость), её читает разовый перенос данных.
     end note
 }
 
@@ -452,6 +470,64 @@ package "agent-restrictions.db  (admin-only)" #FDE9E0 {
       • suspend — временный анти-спам бан (PEER_FLOOD, №29, 1 день) либо
         2 забаненных канала за 2 дня (3 дня, дефолт). Снимается автоматически
         по истечении restriction_duration.
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────
+' channel-operations.db (admin-only) — channelOperationsDbPath
+' ─────────────────────────────────────────────────────────────────────
+package "channel-operations.db  (admin-only)" #EDE7F6 {
+
+    entity "operations" as operations {
+        * id : INTEGER <<PK>>
+        --
+        * ts : INTEGER
+        * type : TEXT
+        chat_id : TEXT
+        persona : TEXT
+        * source : TEXT
+        * attrs : TEXT (JSON)
+    }
+
+    entity "channel_identity" as channel_identity {
+        * canonical_link : TEXT <<PK>>
+        --
+        * chat_id : TEXT
+    }
+
+    entity "journal_meta" as journal_meta {
+        * id : INTEGER <<PK>>
+        --
+        * started_at : INTEGER
+    }
+
+    note as N_channel_operations_db
+      <b>Назначение.</b> Централизованный append-only журнал операций над
+      каналами (channel-operations-history) — только у админ-агента. Ключ
+      канала — chat_id (глобальный marked peer id). Отвечает «сколько раз и
+      когда канал забанен у агента», тайм-линия владения, агрегат банов.
+      ----
+      <b>Таблицы</b>
+      • operations — журнал операций; attrs (JSON) — реквизиты, зависят от type
+      • channel_identity — мост «ссылка ↔ chat_id», наполняется при вступлении
+      • journal_meta — момент старта сбора (граница доступности данных, R19)
+    end note
+
+    note bottom of operations
+      <b>type</b> · без начального (append при событии)
+      ----
+      • status_change — смена статуса; attrs: oldAgentId, newAgentId,
+        oldStatus, newStatus. Фиксируются строго переходы: banned, suspend,
+        снятие suspend, leaved_from_banned, leaved_manual (белый список R8;
+        should_leave и прочие статусы не журналируются).
+      • assigned — смена владельца; attrs: oldAgentId (пусто при первичном),
+        newAgentId, canonicalLink. chat_id = NULL до первого join.
+      • joined — вступление агента; attrs: agentId.
+      ----
+      <b>source</b> · operator | monitor | timer | module
+      ----
+      <b>Записи неизменяемы</b> (только INSERT). Дедуп «один переход = одна
+      запись» и «banned→banned не новый бан» — детект перехода при записи.
     end note
 }
 
@@ -512,6 +588,9 @@ daily_stats }o..o{ snapshots : agent_id
 ' Логические межтабличные связи внутри tg-channels.db (по chatId / userId, без FK):
 dm_candidates }o..|| channels : sourceChatId → chatId
 dm_history    }o..o{ dm_candidates : userId
+
+' Логические связи внутри channel-operations.db (по chat_id / ссылке, без FK):
+channel_identity }o..o{ operations : chat_id ↔ canonical_link (мост)
 
 ' Логические межфайловые связи (FK невозможны — разные файлы SQLite):
 replies        }o..|| channels : chatId

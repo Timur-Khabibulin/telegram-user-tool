@@ -1,0 +1,15 @@
+# Запуск свипа замены в 16:00 UTC+5 (11:00 UTC) — днём, с отступом от занятых слотов:
+# tg-channel-rotation (07:00 UTC), tg-reauth-sweep (09:00 UTC), tg-daily-summary/
+# tg-funnel-tracker (19:00/19:10 UTC). Замена трогает Telegram (создание канала и
+# т.п.), поэтому час выбран вне пиковых суточных задач. Persistent=true — прогон
+# наверстается, если VPS был выключен в момент срабатывания.
+
+[Unit]
+Description=Telegram banned-account replacement sweep timer (16:00 UTC+5 = 11:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 11:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

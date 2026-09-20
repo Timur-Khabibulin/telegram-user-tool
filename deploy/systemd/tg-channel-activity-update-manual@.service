@@ -27,8 +27,8 @@ After=network.target
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
-ExecStart=/usr/bin/bash /root/.openclaw/extensions/telegram-user-tool/src/scripts/ops/channel-activity-update-manual.sh %i
+WorkingDirectory=/root/openclaw-plugins/telegram-user-tool
+ExecStart=/usr/bin/bash /root/openclaw-plugins/telegram-user-tool/src/scripts/ops/channel-activity-update-manual.sh %i
 EnvironmentFile=-/root/.openclaw/codex-auth/.env
 EnvironmentFile=-/root/.openclaw/secrets.env
 # Свой slice (не tg-agents.slice) — см. tg-channel-activity-update.slice.

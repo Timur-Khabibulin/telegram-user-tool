@@ -9,8 +9,8 @@ After=network.target
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
-ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/daily-summary.ts --send-as agent27
+WorkingDirectory=/root/openclaw-plugins/telegram-user-tool
+ExecStart=/root/openclaw-plugins/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/daily-summary.ts --send-as agent27
 EnvironmentFile=-/root/.openclaw/codex-auth/.env
 EnvironmentFile=-/root/.openclaw/secrets.env
 Slice=tg-agents.slice

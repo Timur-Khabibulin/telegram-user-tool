@@ -7,11 +7,14 @@
 // которое monitor-v3.ts уже унаследовал (design.md monitor-v3, решение 7).
 
 import type { Logger } from "./logger";
+import type { OperationSource } from "./db/channel-operations";
 import { classifyTelegramErrorTag, parseFloodWait } from "./telegram/errors";
+import { classifySendError } from "./write-access";
 import {
     createGroupThread,
     savePostWatchComment,
     markChannelStatus,
+    setWriteAccessReason,
     recordSendError,
     countRecentlyBannedChannels,
     type SendErrorSource,
@@ -71,6 +74,9 @@ export function handlePostCommentSendError(
     const msg = err?.message ?? String(err);
     log.warn(`[post-comment-send:${source}] отправка не удалась chatId=${chatId}: ${msg}`);
     const tag = classifyTelegramErrorTag(err);
+    // Источник для журнала операций (channel-operations-history): review-listener
+    // — отдельный фоновый контекст (module), остальные вызовы — мониторный.
+    const journalSource: OperationSource = source === "review_listener" ? "module" : "monitor";
 
     if (tag === "peer_flood") {
         upsertRestriction(FUNNEL_ADMIN_AGENT_ID, agentId, "suspend", msg, 86400);
@@ -79,8 +85,14 @@ export function handlePostCommentSendError(
     }
 
     if (tag === "chat_write_forbidden" || tag === "user_banned_in_channel") {
+        // channel-write-access (§4.3): переменная причина права записи —
+        // CHAT_WRITE_FORBIDDEN / account_kicked. Плюс status='banned' (вход в
+        // leave/rotate, R9) — прежнее поведение без изменений.
+        const reason = classifySendError(tag);
+        if (reason) setWriteAccessReason(agentId, chatId, reason, log);
         recordSendError(agentId, { chatId, source, errorCode: "chat_write_forbidden" }, log);
-        markChannelStatus(agentId, chatId, "banned", log);
+        // Причина пробрасывается в событие бана журнала операций (§6).
+        markChannelStatus(agentId, chatId, "banned", log, undefined, undefined, journalSource, reason ?? undefined);
 
         const recentlyBanned = countRecentlyBannedChannels(agentId, RECENTLY_BANNED_WINDOW_SECONDS);
         if (recentlyBanned >= RECENTLY_BANNED_THRESHOLD) {
@@ -90,8 +102,19 @@ export function handlePostCommentSendError(
         return "banned";
     }
 
-    if (tag === "chat_send_plain_forbidden" || tag === "chat_send_media_forbidden" || tag === "allow_payment_required") {
-        markChannelStatus(agentId, chatId, "format_error", log);
+    if (tag === "allow_payment_required") {
+        // channel-write-access (§2.3/§4.3): постоянная причина `paid` — канал
+        // остаётся read-only, `status` НЕ трогаем (прежний 'format_error' убран).
+        // Отправки дальше гейтит постоянная причина (precheck monitor-v5).
+        setWriteAccessReason(agentId, chatId, "paid", log);
+        return "format_error";
+    }
+
+    if (tag === "chat_send_plain_forbidden" || tag === "chat_send_media_forbidden") {
+        // Запрет формата контента (№25-26) — канал сам не забанен, только
+        // отклоняет способ отправки. Вне перечня причин права записи (§2.3):
+        // поведение как раньше — 'format_error', причину не пишем.
+        markChannelStatus(agentId, chatId, "format_error", log, undefined, undefined, journalSource);
         return "format_error";
     }
 

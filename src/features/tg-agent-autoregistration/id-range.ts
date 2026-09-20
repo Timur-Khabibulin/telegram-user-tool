@@ -3,9 +3,9 @@
 import { listAgentIds } from "../../core/config";
 import { listStagingAgentIds } from "./staging";
 
-/** N = число ссылок в megaLinks; agentId по порядку — <prefix>startAgentNumber..+N-1 (R-11). */
-export function computeAgentIdRange(startAgentNumber: number, megaLinksCount: number): string[] {
-    return Array.from({ length: megaLinksCount }, (_, i) => `agent${startAgentNumber + i}`);
+/** N = число ссылок в links; agentId по порядку — <prefix>startAgentNumber..+N-1 (R-11). */
+export function computeAgentIdRange(startAgentNumber: number, linksCount: number): string[] {
+    return Array.from({ length: linksCount }, (_, i) => `agent${startAgentNumber + i}`);
 }
 
 export interface RangeCheckResult {

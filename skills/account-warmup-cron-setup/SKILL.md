@@ -1,9 +1,11 @@
 ---
 name: account-warmup-cron-setup
-description: "Creates a cron job for Telegram account warming every 5 hours for a given agent. Use when the user wants to set up a scheduled warmup task for a specific agent."
+description: "DEPRECATED — выведен из эксплуатации. Creates a cron job for Telegram account warming every 5 hours for a given agent. Use when the user wants to set up a scheduled warmup task for a specific agent."
 ---
 
 # Account Warmup Cron Setup
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Шаг 1 — Определить agentId
 

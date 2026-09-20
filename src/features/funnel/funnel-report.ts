@@ -29,9 +29,10 @@ function signed(n: number): string {
     return n >= 0 ? `+${n}` : `${n}`;
 }
 
-/** Значок статуса агента в таблице отчёта: ❌ — banned, ⚠️ — need_update_session/suspend. */
+/** Значок статуса агента в таблице отчёта: ❌ — banned, ⚠️ — need_update_session/suspend, 🔧 — manual_reauth. */
 function restrictionIcon(type: AgentFunnelRow["restrictionType"]): string {
     if (type === "banned") return " ❌";
+    if (type === "manual_reauth") return " 🔧";
     if (type === "need_update_session" || type === "suspend") return " ⚠️";
     return "";
 }
@@ -114,7 +115,7 @@ export function renderFunnel(r: FunnelResult): string {
     out.push("Отпр — каналов с отправкой хотя бы одного сообщения за день; полная разбивка — в CSV");
     out.push("Заяв — заявки в приватный канал по ссылке агента; «—» — ссылка не настроена");
     out.push("Охват — потенциальный охват (avg_views каналов с ответами)");
-    out.push("❌ — banned, ⚠️ — need_update_session/suspend");
+    out.push("❌ — banned, ⚠️ — need_update_session/suspend, 🔧 — manual_reauth");
 
     // ── Ошибки за день (агрегат по всем агентам) ──
     const errorTotals = new Map<string, number>();
@@ -184,7 +185,7 @@ function csvEscapeField(s: string): string {
 export function buildFunnelCsv(r: FunnelResult): string {
     const header = [
         "agent_id",
-        "пул",
+        "персона",
         "каналов_у_агента",
         "каналов_просмотрено",
         "каналов_активно",
@@ -203,7 +204,7 @@ export function buildFunnelCsv(r: FunnelResult): string {
 
     const rows: string[][] = r.agents.map((a) => [
         a.agentId,
-        a.poolName ?? "—",
+        a.persona ?? "—",
         String(a.channelsTotal),
         String(a.channelsVisited),
         String(a.channelsActive),

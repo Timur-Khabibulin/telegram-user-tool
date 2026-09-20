@@ -1,9 +1,11 @@
 ---
 name: join-queue-setup
-description: "One-time setup skill: adds Telegram channel links to the join queue and creates a cron job (if not already running) that processes them in batches. Use when the user provides a list of channels to join automatically."
+description: "DEPRECATED — выведен из эксплуатации. One-time setup skill: adds Telegram channel links to the join queue and creates a cron job (if not already running) that processes them in batches. Use when the user provides a list of channels to join automatically."
 ---
 
 # Join Queue Setup
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Алгоритм выполнения
 

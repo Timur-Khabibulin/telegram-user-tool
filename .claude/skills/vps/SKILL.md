@@ -8,7 +8,7 @@ VPS connection uses `ssh -i ~/.ssh/vps_key`. Credentials and paths are in `local
 | Variable | Value |
 |---|---|
 | Host | `root@<VPS_HOST>` |
-| Plugin dir | `~/.openclaw/extensions/telegram-user-tool/` |
+| Plugin dir | `~/openclaw-plugins/telegram-user-tool/` |
 | Skills dir | `~/.openclaw/workspace/skills/` |
 | Agent workspace | `~/.openclaw/workspace-<agentId>/` |
 | Config | `~/.openclaw/openclaw.json` |
@@ -48,8 +48,8 @@ Map local paths to remote paths:
 |---|---|
 | `SOUL.md` | `~/.openclaw/workspace-<agentId>/SOUL.md` |
 | `skills/<name>/SKILL.md` | `~/.openclaw/workspace/skills/<name>/SKILL.md` |
-| `src/*` | `~/.openclaw/extensions/telegram-user-tool/` |
-| `index.ts` | `~/.openclaw/extensions/telegram-user-tool/` |
+| `src/*` | `~/openclaw-plugins/telegram-user-tool/` |
+| `index.ts` | `~/openclaw-plugins/telegram-user-tool/` |
 
 ```
 scp -i ~/.ssh/vps_key <local-path> root@<VPS_HOST>:<remote-path>

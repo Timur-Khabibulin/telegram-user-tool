@@ -120,7 +120,7 @@ systemd-run
   --unit=tg-script-<name>.service          # детерминированное имя (лок + адресуемость)
   --collect                                 # выгрузить юнит после завершения (даже при ошибке)
   --slice=tg-agents.slice                   # те же CPUQuota/MemoryMax, что у агентов
-  --working-directory=/root/.openclaw/extensions/telegram-user-tool
+  --working-directory=/root/openclaw-plugins/telegram-user-tool
   -p EnvironmentFile=-/root/.openclaw/codex-auth/.env   # тот же доступ к LLM
   -p TimeoutStopSec=<grace>                 # бюджет мягкой остановки (AC-6)
   -p KillSignal=SIGTERM                     # по умолчанию SIGTERM, фиксируем явно
@@ -300,7 +300,7 @@ systemctl show <unit> -p ExecMainStartTimestamp --value
   обычным деплоем (`scp`/skill `vps`) — `daemon-reload` не нужен (юнитов не меняем).
 - Переиспользуются: `tg-agents.slice` (ресурсные лимиты через `--slice=`),
   `EnvironmentFile=-/root/.openclaw/codex-auth/.env` (доступ к LLM),
-  `WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool`.
+  `WorkingDirectory=/root/openclaw-plugins/telegram-user-tool`.
 - Требование к среде: на хосте доступен `systemd-run` (подтверждено в задаче), гейтвей
   работает от root (подтверждено `User=root`/`openclaw.service`).
 - `operation.md` дополнить разделом про операторские прогоны: имена юнитов

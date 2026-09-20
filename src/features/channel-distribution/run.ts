@@ -9,9 +9,9 @@ import type { Logger } from "../../core/logger";
 import { FUNNEL_ADMIN_AGENT_ID } from "../../core/config";
 import {
     normalizeChannelLink,
-    getChannelStatus,
-    registerChannel,
-    assignmentCounts,
+    getAssignment,
+    assignToPersona,
+    assignmentCountsForPersona,
     setChannelMetricsJson,
 } from "../../core/db/discovery";
 import { addJoinQueue } from "../../core/db/join-queue";
@@ -97,7 +97,7 @@ export function parseCsv(csvText: string): ParseResult<CsvRow[]> {
     return { ok: true, value: rows };
 }
 
-// ─── Разбор набора агентов ────────────────────────────────────────────
+// ─── Разбор ссылок ─────────────────────────────────────────────────────
 
 /** Зарезервированные пути t.me, ошибочно проходящие проверку username по длине/символам. */
 const RESERVED_USERNAMES = new Set(["joinchat", "c", "s", "proxy", "socks", "addstickers", "addemoji", "addlist"]);
@@ -118,50 +118,6 @@ export function isSupportedChannelLink(rawLink: string): boolean {
     return true;
 }
 
-/**
- * Разбирает набор целевых агентов: список и/или один или несколько диапазонов
- * `agentId`, через запятую (например `agent6-agent10, agent15`). Диапазон —
- * `<prefix><from>-<prefix><to>` с общим буквенным префиксом. Валидирует каждого
- * агента против `knownAgents`; неизвестный, пустой или нераспознанный набор →
- * отказ (R17). Порядок результата — по возрастанию номера, без дублей.
- */
-export function parseAgentSpec(spec: string, knownAgents: ReadonlySet<string>): ParseResult<string[]> {
-    const tokens = spec.split(",").map((t) => t.trim()).filter((t) => t.length > 0);
-    if (tokens.length === 0) return { ok: false, reason: "набор агентов пуст" };
-
-    const collected = new Set<string>();
-    for (const token of tokens) {
-        const rangeMatch = token.match(/^([a-z]+)(\d+)-([a-z]+)(\d+)$/i);
-        if (rangeMatch) {
-            const [, prefixFrom, fromRaw, prefixTo, toRaw] = rangeMatch;
-            if (prefixFrom.toLowerCase() !== prefixTo.toLowerCase()) {
-                return { ok: false, reason: `диапазон с разными префиксами: «${token}»` };
-            }
-            const from = Number(fromRaw);
-            const to = Number(toRaw);
-            if (from > to) return { ok: false, reason: `пустой диапазон: «${token}»` };
-            for (let n = from; n <= to; n += 1) collected.add(`${prefixFrom.toLowerCase()}${n}`);
-            continue;
-        }
-        if (/^[a-z]+\d+$/i.test(token)) {
-            collected.add(token.toLowerCase());
-            continue;
-        }
-        return { ok: false, reason: `не распознан агент/диапазон: «${token}»` };
-    }
-
-    const unknown = [...collected].filter((id) => !knownAgents.has(id));
-    if (unknown.length > 0) return { ok: false, reason: `неизвестные агенты: ${unknown.join(", ")}` };
-
-    const sorted = [...collected].sort((a, b) => agentNumber(a) - agentNumber(b) || (a < b ? -1 : 1));
-    return { ok: true, value: sorted };
-}
-
-function agentNumber(agentId: string): number {
-    const m = agentId.match(/(\d+)$/);
-    return m ? Number(m[1]) : 0;
-}
-
 // ─── Классификация исходов ────────────────────────────────────────────
 
 interface Classification {
@@ -170,7 +126,7 @@ interface Classification {
     error: number;
 }
 
-function classifyRows(rows: readonly CsvRow[], adminAgentId: string, log: Logger): Classification {
+function classifyRows(rows: readonly CsvRow[], adminAgentId: string, persona: string, log: Logger): Classification {
     const seen = new Set<string>();
     const candidates: Candidate[] = [];
     let skipped = 0;
@@ -194,9 +150,11 @@ function classifyRows(rows: readonly CsvRow[], adminAgentId: string, log: Logger
             continue;
         }
         seen.add(canonicalLink);
-        if (getChannelStatus(adminAgentId, canonicalLink) !== null) {
+        // Дедуп в рамках целевой персоны: канал, закреплённый в ЭТОЙ персоне,
+        // пропускаем; тот же канал в другой персоне — валидный кандидат (R4).
+        if (getAssignment(adminAgentId, persona, canonicalLink) !== null) {
             skipped += 1;
-            log.info(`[channel-distribution] skipped (уже закреплён) «${canonicalLink}»`);
+            log.info(`[channel-distribution] skipped (уже закреплён в персоне «${persona}») «${canonicalLink}»`);
             continue;
         }
         candidates.push({ canonicalLink, metrics: row.metrics });
@@ -208,21 +166,24 @@ function classifyRows(rows: readonly CsvRow[], adminAgentId: string, log: Logger
 // ─── Оркестрация ──────────────────────────────────────────────────────
 
 /**
- * Распределяет уже разобранные строки CSV по уже провалидированному набору
- * целевых агентов. Классифицирует исходы, балансирует новые каналы (water-fill
- * по `assignmentCounts`), регистрирует их с метриками, ставит в очередь батчем и
- * включает join-queue у целевых агентов. Частичный успех (R25) обеспечивается
- * идемпотентными записями (`INSERT OR IGNORE`) — уже добавленные каналы остаются.
+ * Распределяет уже разобранные строки CSV на целевую персону по уже
+ * провалидированному (непустому) набору её активных агентов. Дедуп в рамках
+ * персоны, балансирует новые каналы (water-fill по `assignmentCountsForPersona`),
+ * закрепляет их с метриками, ставит в очередь батчем и включает join-queue у
+ * целевых агентов. Пустой `targetAgentIds` — ответственность вызывающего (отказ до
+ * вызова, R12), поэтому пустая раскладка здесь означала бы потерю входа; вызывающий
+ * это исключает. Частичный успех (R25) — идемпотентные записи (`INSERT OR IGNORE`).
  */
 export function runDistribution(
     rows: readonly CsvRow[],
+    persona: string,
     targetAgentIds: readonly string[],
     log: Logger,
     adminAgentId: string = FUNNEL_ADMIN_AGENT_ID,
 ): DistributionResult {
-    const { candidates, skipped, error } = classifyRows(rows, adminAgentId, log);
+    const { candidates, skipped, error } = classifyRows(rows, adminAgentId, persona, log);
 
-    const startLoad = new Map<string, number>(Object.entries(assignmentCounts(adminAgentId)));
+    const startLoad = new Map<string, number>(Object.entries(assignmentCountsForPersona(adminAgentId, persona)));
     const metricsByLink = new Map(candidates.map((c) => [c.canonicalLink, c.metrics] as const));
     const assignments = planDistribution(
         candidates.map((c) => c.canonicalLink),
@@ -233,7 +194,7 @@ export function runDistribution(
     const linksByAgent = new Map<string, string[]>();
     let added = 0;
     for (const { canonicalLink, targetAgentId } of assignments) {
-        registerChannel(adminAgentId, canonicalLink, targetAgentId);
+        assignToPersona(adminAgentId, { persona, canonicalLink, agentId: targetAgentId });
         setChannelMetricsJson(adminAgentId, canonicalLink, metricsByLink.get(canonicalLink) ?? {});
         const links = linksByAgent.get(targetAgentId) ?? [];
         links.push(canonicalLink);

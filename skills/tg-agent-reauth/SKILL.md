@@ -1,9 +1,11 @@
 ---
 name: tg-agent-reauth
-description: "Re-authorize an EXISTING Telegram agent: obtains a fresh session string via auth tools and overwrites only the sessionString field in the agent's tg-account.json. Use when an agent's session is dead — e.g. AUTH_KEY_DUPLICATED, account frozen, manual logout, or session revoked — and the agent already exists (do NOT recreate it). For creating a brand-new agent use tg-agent-create instead."
+description: "DEPRECATED — выведен из эксплуатации. Re-authorize an EXISTING Telegram agent: obtains a fresh session string via auth tools and overwrites only the sessionString field in the agent's tg-account.json. Use when an agent's session is dead — e.g. AUTH_KEY_DUPLICATED, account frozen, manual logout, or session revoked — and the agent already exists (do NOT recreate it). For creating a brand-new agent use tg-agent-create instead."
 ---
 
 # Telegram agent re-auth
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 Переавторизация **уже существующего** агента. Не создаёт агента, не трогает биндинги,
 файловую структуру и SOUL.md — только получает новую `sessionString` и

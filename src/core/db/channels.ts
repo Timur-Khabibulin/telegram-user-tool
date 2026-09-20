@@ -7,9 +7,12 @@
 
 import * as fs from "fs";
 import Database from "better-sqlite3";
-import { channelsDbPath, CHANNEL_CHECK_PERIOD_SECONDS } from "../config";
+import { channelsDbPath, CHANNEL_CHECK_PERIOD_SECONDS, FUNNEL_ADMIN_AGENT_ID } from "../config";
 import type { Logger } from "../logger";
 import type { ChannelIdentity } from "../telegram/service";
+import type { WriteAccessReason } from "../write-access";
+import { recordStatusChange, recordJoined, type OperationSource } from "./channel-operations";
+import { normalizeChannelLink } from "./discovery";
 import {
     findThreadByAgentMsgId,
     createThread,
@@ -42,6 +45,12 @@ interface ChannelRow {
     lastProcessedAt: number;
     /** telegram-error-handling: 'banned'/'suspend' останавливает обработку канала в monitor-v2, 'format_error' — нет. */
     status: ChannelStatus | null;
+    /**
+     * channel-write-access: причина «писать нельзя» (NULL = можно/не проверялось).
+     * Постоянная (`isPermanentReason`) гейтит фазу отправок монитора без живого
+     * `GetParticipant`; переменная сюда пишется вместе со `status='banned'`.
+     */
+    write_access_reason: WriteAccessReason | null;
 }
 
 export interface ClassifyInputMessage {
@@ -164,6 +173,7 @@ export function initChannels(agentId: string, log: Logger): { ok: true } {
         migratePostWatchColumns(db);
         migrateChannelContextColumns(db);
         migrateActivityColumns(db);
+        migrateWriteAccessColumns(db);
         log.info(`[tg-channels-db] tg_channels_init — done`);
         return { ok: true };
     } finally {
@@ -304,6 +314,72 @@ function migrateActivityColumns(db: Database.Database): void {
     add("activity_updated_at", "INTEGER");
 }
 
+/**
+ * Аддитивная миграция колонок права писать (channel-write-access):
+ * `write_access_reason` — причина «писать нельзя» из фиксированного перечня
+ * (`core/write-access.ts`), NULL = можно писать / ещё не проверялось;
+ * `write_access_until` — `until_date` персонального ограничения (`account_muted`),
+ * хранится справочно (R11), плановой переоценки по нему нет. Обе nullable, дефолт
+ * NULL, без бэкафилла: у существующих строк признак пуст, первая живая проверка/
+ * отказ отправки его самозаполнят.
+ */
+function migrateWriteAccessColumns(db: Database.Database): void {
+    const cols = (db.prepare(`PRAGMA table_info(channels)`).all() as { name: string }[]).map((c) => c.name);
+    const add = (name: string, decl: string) => {
+        if (!cols.includes(name)) db.exec(`ALTER TABLE channels ADD COLUMN ${name} ${decl}`);
+    };
+    add("write_access_reason", "TEXT");
+    add("write_access_until", "INTEGER");
+}
+
+/**
+ * Пишет причину «писать нельзя» (channel-write-access) и справочный `until`
+ * (только для `account_muted`; для прочих причин передаётся null). Признак
+ * хранится отдельно от `status` — простановка `status='banned'` (переменная
+ * причина, вход в ротацию) делается вызывающим отдельно. `initChannels` не
+ * вызывается: функция работает по существующей строке канала.
+ */
+export function setWriteAccessReason(
+    agentId: string,
+    chatId: string,
+    reason: WriteAccessReason,
+    log: Logger,
+    until: number | null = null,
+): void {
+    const db = openDb(channelsDbPath(agentId));
+    try {
+        migrateWriteAccessColumns(db);
+        db.prepare(`
+            UPDATE channels
+            SET write_access_reason = @reason, write_access_until = @until
+            WHERE chatId = @chatId
+        `).run({ reason, until, chatId });
+        log.info(`[tg-channels-db] setWriteAccessReason — agentId=${agentId} chatId=${chatId} reason=${reason} until=${until ?? "null"}`);
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * Снимает признак «писать нельзя» (channel-write-access) — живая проверка перед
+ * прогоном отправок показала участника без ограничения (AC-10). Сбрасывает и
+ * `write_access_until`.
+ */
+export function clearWriteAccessReason(agentId: string, chatId: string, log: Logger): void {
+    const db = openDb(channelsDbPath(agentId));
+    try {
+        migrateWriteAccessColumns(db);
+        db.prepare(`
+            UPDATE channels
+            SET write_access_reason = NULL, write_access_until = NULL
+            WHERE chatId = @chatId
+        `).run({ chatId });
+        log.info(`[tg-channels-db] clearWriteAccessReason — agentId=${agentId} chatId=${chatId}`);
+    } finally {
+        db.close();
+    }
+}
+
 /** Статусы, которые считаются терминальными (агент сам не участник чата) — channel-not-found-recovery. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
     "banned", "suspend", "leaved_from_banned", "leaved_manual", "should_leave",
@@ -391,7 +467,7 @@ export function getChannelsBatch(
     const db = openDb(channelsDbPath(agentId), true);
     try {
         const rows = db.prepare(`
-            SELECT chatId, title, lastProcessedAt, status
+            SELECT chatId, title, lastProcessedAt, status, write_access_reason
             FROM channels
             WHERE (lastProcessedAt = 0
                OR lastProcessedAt <= strftime('%s','now') - @periodSeconds)
@@ -499,7 +575,9 @@ export function markChannelProcessed(agentId: string, chatId: string, log: Logge
  * `durationSeconds` — длительность действия статуса в секундах; `undefined`/не
  * передан = бессрочно (текущее поведение `banned`/`format_error`, без
  * изменений). `description` — свободный текст причины (channel-suspend-on-deletion),
- * без фиксированной таксономии.
+ * без фиксированной таксономии. `writeAccessReason` (channel-write-access) —
+ * переменная причина права записи для события бана в журнале операций; передаётся
+ * только ban-сайтами пути права записи, иначе `reason` в событие не попадает.
  */
 export function markChannelStatus(
     agentId: string,
@@ -508,25 +586,36 @@ export function markChannelStatus(
     log: Logger,
     durationSeconds?: number,
     description?: string,
+    source: OperationSource = "monitor",
+    writeAccessReason?: WriteAccessReason,
 ): void {
+    let oldStatus: string | null = null;
     const db = openDb(channelsDbPath(agentId));
     try {
         migrateStatusColumns(db);
-        db.prepare(`
-            UPDATE channels
-            SET status = @status, statusUpdatedAt = @now, statusDurationSeconds = @durationSeconds, status_description = @description
-            WHERE chatId = @chatId
-        `).run({
-            status,
-            now: Math.floor(Date.now() / 1000),
-            durationSeconds: durationSeconds ?? null,
-            description: description ?? null,
-            chatId,
-        });
+        // Читаем прежний статус и обновляем атомарно — детект перехода при записи
+        // (channel-operations-history): гейт old==new закрывает дедуп R9 и «новый
+        // бан» R10 в channel-operations.classifyStatusTransition.
+        db.transaction(() => {
+            oldStatus = (db.prepare(`SELECT status FROM channels WHERE chatId = ?`).get(chatId) as
+                { status: string | null } | undefined)?.status ?? null;
+            db.prepare(`
+                UPDATE channels
+                SET status = @status, statusUpdatedAt = @now, statusDurationSeconds = @durationSeconds, status_description = @description
+                WHERE chatId = @chatId
+            `).run({
+                status,
+                now: Math.floor(Date.now() / 1000),
+                durationSeconds: durationSeconds ?? null,
+                description: description ?? null,
+                chatId,
+            });
+        })();
         log.info(`[tg-channels-db] markChannelStatus — agentId=${agentId} chatId=${chatId} status=${status} durationSeconds=${durationSeconds ?? "infinite"}`);
     } finally {
         db.close();
     }
+    recordStatusChange({ adminAgentId: FUNNEL_ADMIN_AGENT_ID, chatId, agentId, oldStatus, newStatus: status, source, reason: writeAccessReason }, log);
 }
 
 export interface ChannelStatusInfoRow {
@@ -589,20 +678,35 @@ export function resetChannelStatuses(agentId: string, chatIds: string[], log: Lo
  * NULL`, т.е. текущие `banned`/`format_error`) не затрагиваются.
  */
 export function expireChannelStatuses(agentId: string, log: Logger): void {
+    let suspendLifted: string[] = [];
     const db = openDb(channelsDbPath(agentId));
     try {
         migrateStatusColumns(db);
         const now = Math.floor(Date.now() / 1000);
-        const result = db.prepare(`
-            UPDATE channels
-            SET status = NULL, statusUpdatedAt = NULL, statusDurationSeconds = NULL, status_description = NULL
-            WHERE statusDurationSeconds IS NOT NULL AND @now >= statusUpdatedAt + statusDurationSeconds
-        `).run({ now });
-        if (result.changes > 0) {
-            log.info(`[tg-channels-db] expireChannelStatuses — agentId=${agentId} expired=${result.changes}`);
-        }
+        // Пообъектная обработка (channel-operations-history): читаем истёкшие
+        // строки с их статусом, чтобы отличить снятие suspend (журналируется,
+        // источник timer) от sleep (гасится, но не журналируется). Внешнее
+        // поведение сброса статусов не меняется.
+        db.transaction(() => {
+            const expired = db.prepare(`
+                SELECT chatId, status FROM channels
+                WHERE statusDurationSeconds IS NOT NULL AND @now >= statusUpdatedAt + statusDurationSeconds
+            `).all({ now }) as { chatId: string; status: string | null }[];
+            suspendLifted = expired.filter((r) => r.status === "suspend").map((r) => r.chatId);
+            const result = db.prepare(`
+                UPDATE channels
+                SET status = NULL, statusUpdatedAt = NULL, statusDurationSeconds = NULL, status_description = NULL
+                WHERE statusDurationSeconds IS NOT NULL AND @now >= statusUpdatedAt + statusDurationSeconds
+            `).run({ now });
+            if (result.changes > 0) {
+                log.info(`[tg-channels-db] expireChannelStatuses — agentId=${agentId} expired=${result.changes}`);
+            }
+        })();
     } finally {
         db.close();
+    }
+    for (const chatId of suspendLifted) {
+        recordStatusChange({ adminAgentId: FUNNEL_ADMIN_AGENT_ID, chatId, agentId, oldStatus: "suspend", newStatus: null, source: "timer" }, log);
     }
 }
 
@@ -918,18 +1022,25 @@ export interface JoinedChannelIdentityRow {
  * подтверждённый факт членства, поэтому любой прежний статус (в частности
  * залипший `leaved_manual`) неактуален. `lastProcessedAt`, история визитов и
  * метрики этим шагом не затрагиваются.
+ *
+ * channel-write-access (§4.1): постоянная величина права (`writeAccessReason` —
+ * `members_restricted` при `default_banned_rights.send_messages=true`, иначе NULL)
+ * пишется ПЕРЕЗАПИСЬЮ — успешный join заново снимает величину, залипшая старая
+ * причина неактуальна. `write_access_until` при join всегда сбрасывается (у
+ * постоянной причины срока нет).
  */
 export function upsertChannelIdentityFromJoin(
     agentId: string,
     identity: JoinedChannelIdentityRow,
+    writeAccessReason: WriteAccessReason | null,
     log: Logger,
 ): void {
     initChannels(agentId, log);
     const db = openDb(channelsDbPath(agentId));
     try {
         db.prepare(`
-            INSERT INTO channels (chatId, title, chatUsername, lastProcessedAt, channelId, channelAccessHash, channelUsername, channelResolved, chatAccessHash)
-            VALUES (@chatId, @title, @chatUsername, 0, @channelId, @channelAccessHash, @channelUsername, 1, @chatAccessHash)
+            INSERT INTO channels (chatId, title, chatUsername, lastProcessedAt, channelId, channelAccessHash, channelUsername, channelResolved, chatAccessHash, write_access_reason, write_access_until)
+            VALUES (@chatId, @title, @chatUsername, 0, @channelId, @channelAccessHash, @channelUsername, 1, @chatAccessHash, @writeAccessReason, NULL)
             ON CONFLICT(chatId) DO UPDATE SET
                 title = excluded.title,
                 chatUsername = excluded.chatUsername,
@@ -941,12 +1052,27 @@ export function upsertChannelIdentityFromJoin(
                 status = NULL,
                 statusUpdatedAt = NULL,
                 statusDurationSeconds = NULL,
-                status_description = NULL
-        `).run(identity);
-        log.info(`[tg-channels-db] upsertChannelIdentityFromJoin — agentId=${agentId} chatId=${identity.chatId}`);
+                status_description = NULL,
+                write_access_reason = excluded.write_access_reason,
+                write_access_until = NULL
+        `).run({
+            chatId: identity.chatId,
+            title: identity.title,
+            chatUsername: identity.chatUsername,
+            channelId: identity.channelId,
+            channelAccessHash: identity.channelAccessHash,
+            channelUsername: identity.channelUsername,
+            chatAccessHash: identity.chatAccessHash,
+            writeAccessReason,
+        });
+        log.info(`[tg-channels-db] upsertChannelIdentityFromJoin — agentId=${agentId} chatId=${identity.chatId} writeAccessReason=${writeAccessReason ?? "null"}`);
     } finally {
         db.close();
     }
+    // Мост ссылка↔chatId + операция joined (channel-operations-history):
+    // единственная точка, где известны и chatId, и публичная ссылка канала.
+    const canonicalLink = identity.channelUsername ? normalizeChannelLink(identity.channelUsername) : null;
+    recordJoined({ adminAgentId: FUNNEL_ADMIN_AGENT_ID, chatId: identity.chatId, agentId, canonicalLink, source: "module" }, log);
 }
 
 /** Каналы агента с резолвленной идентичностью (для прогона анализа). */
@@ -1465,18 +1591,24 @@ export function setLeftChannelStatus(
     status: "leaved_from_banned" | "leaved_manual",
     log: Logger,
 ): { ok: true } {
+    let oldStatus: string | null = null;
     const db = openDb(channelsDbPath(agentId));
     try {
-        db.prepare(`
-            UPDATE channels
-            SET status = @status, statusUpdatedAt = strftime('%s','now'), statusDurationSeconds = NULL, status_description = NULL
-            WHERE chatId = @chatId
-        `).run({ chatId, status });
+        db.transaction(() => {
+            oldStatus = (db.prepare(`SELECT status FROM channels WHERE chatId = ?`).get(chatId) as
+                { status: string | null } | undefined)?.status ?? null;
+            db.prepare(`
+                UPDATE channels
+                SET status = @status, statusUpdatedAt = strftime('%s','now'), statusDurationSeconds = NULL, status_description = NULL
+                WHERE chatId = @chatId
+            `).run({ chatId, status });
+        })();
         log.info(`[tg-channels-db] setLeftChannelStatus — agentId=${agentId} chatId=${chatId} status=${status}`);
-        return { ok: true };
     } finally {
         db.close();
     }
+    recordStatusChange({ adminAgentId: FUNNEL_ADMIN_AGENT_ID, chatId, agentId, oldStatus, newStatus: status, source: "module" }, log);
+    return { ok: true };
 }
 
 /**
@@ -1549,27 +1681,6 @@ export function countLeavedFromBannedWithoutUsername(agentId: string): number {
     try {
         const row = db.prepare(`
             SELECT COUNT(*) AS c FROM channels WHERE status = 'leaved_from_banned' AND channelUsername IS NULL
-        `).get() as { c: number };
-        return row.c;
-    } catch {
-        return 0;
-    } finally {
-        db.close();
-    }
-}
-
-/**
- * Активная нагрузка агента (channel-rotation) — число каналов, не исключённых
- * фильтром «активен для обработки» (тот же список статусов, что getChannelsBatch).
- * Используется для сортировки целевых агентов по возрастанию нагрузки.
- */
-export function countActiveChannels(agentId: string): number {
-    if (!fs.existsSync(channelsDbPath(agentId))) return 0;
-    const db = openDb(channelsDbPath(agentId), true);
-    try {
-        const row = db.prepare(`
-            SELECT COUNT(*) AS c FROM channels
-            WHERE status IS NULL OR status NOT IN ('banned', 'suspend', 'leaved_from_banned', 'leaved_manual', 'should_leave', 'not_found')
         `).get() as { c: number };
         return row.c;
     } catch {

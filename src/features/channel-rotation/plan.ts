@@ -21,47 +21,44 @@ export interface RotationPlanResult {
 }
 
 /**
- * Round-robin по активным агентам, отсортированным по возрастанию нагрузки
- * один раз в начале (тай-брейк при равенстве — случайный) — порядок
- * фиксируется на весь прогон, дальше не пересчитывается. Кандидаты
- * распределяются по кругу этого порядка; агент-источник конкретного канала
- * пропускается только для него самого (design.md: «Round-robin по нагрузке»).
+ * Раскладка по истории посещений (channel-rotation-visit-history): каждый канал
+ * получает активного агента персоны с МИНИМАЛЬНЫМ visit-count (число прошлых
+ * `assigned`-событий по этому каналу для агента, `visitsByChannel`), случайно среди
+ * равных, исключая агента-источник. Нагрузка агента больше не участвует (R1).
+ *
+ * Выбор per-candidate независим (design v2, §2.1): visit-count одного канала не
+ * зависит от того, кому в этом же прогоне достался другой — общего курсора/аккумулятора
+ * нет. «Круги» (R6) возникают как следствие роста минимума: пока есть агенты с
+ * visit-count 0 — канал идёт им; когда у всех подходящих ≥1, минимум становится 1 и т.д.
+ *
+ * `visitsByChannel` — карта `chatId → (agentId → count)`; отсутствие агента во
+ * внутренней карте (или отсутствие самого канала) трактуется как visit-count 0.
  */
 export function planRotation(
     candidates: RotationCandidate[],
     activeAgentIds: string[],
-    loadByAgent: Map<string, number>,
+    visitsByChannel: ReadonlyMap<string, ReadonlyMap<string, number>>,
 ): RotationPlanResult {
-    const sortedCandidates = [...candidates].sort((a, b) => (a.statusUpdatedAt ?? 0) - (b.statusUpdatedAt ?? 0));
-
-    const targets = activeAgentIds
-        .map((id) => ({ id, load: loadByAgent.get(id) ?? 0, tieBreak: Math.random() }))
-        .sort((a, b) => a.load - b.load || a.tieBreak - b.tieBreak)
-        .map((t) => t.id);
-
     const assignments: RotationAssignment[] = [];
     const unassigned: RotationCandidate[] = [];
-    const n = targets.length;
-    let cursor = 0;
 
-    for (const candidate of sortedCandidates) {
-        if (n === 0) {
+    for (const candidate of candidates) {
+        // R5: источник этого канала исключается из числа целей.
+        const pool = activeAgentIds.filter((id) => id !== candidate.sourceAgentId);
+        if (pool.length === 0) {
+            // Единственный активный агент персоны — источник → цели нет (R7, AC-6).
             unassigned.push(candidate);
             continue;
         }
-        let idx = cursor % n;
-        let attempts = 0;
-        while (targets[idx] === candidate.sourceAgentId && attempts < n) {
-            idx = (idx + 1) % n;
-            attempts += 1;
-        }
-        if (attempts >= n) {
-            // Единственная возможная цель — тот же агент, у которого канал забанен.
-            unassigned.push(candidate);
-            continue;
-        }
-        assignments.push({ candidate, targetAgentId: targets[idx] });
-        cursor = idx + 1;
+
+        const visits = visitsByChannel.get(candidate.chatId);
+        const visitCount = (agentId: string) => visits?.get(agentId) ?? 0;
+
+        const minVisits = Math.min(...pool.map(visitCount));
+        const winners = pool.filter((agentId) => visitCount(agentId) === minVisits);
+        // R4/AC-3: случайный среди равных по минимуму.
+        const targetAgentId = winners[Math.floor(Math.random() * winners.length)];
+        assignments.push({ candidate, targetAgentId });
     }
 
     return { assignments, unassigned };

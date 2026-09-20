@@ -10,7 +10,8 @@
 // Design: docs/design/channel-discovery/channel-discovery-v1.md.
 
 import type { Logger } from "../../core/logger";
-import { normalizeChannelLink, isKnownChannel, registerChannel } from "../../core/db/discovery";
+import { normalizeChannelLink, getAssignment, assignToPersona } from "../../core/db/discovery";
+import { resolvePersonaTargets } from "../../core/persona-targets";
 import { searchChannels, getChannelStat } from "./tgstat";
 import { addJoinQueue } from "../../core/db/join-queue";
 import type { TelegramService } from "../../core/telegram/service";
@@ -23,7 +24,7 @@ export interface RunParams {
     avgReachAgentId?: string;   // agentId для MTProto fallback (D5)
     telegramService?: TelegramService; // готовый авторизованный сервис для MTProto fallback (D5)
     adminAgentId: string;       // владелец реестра discovery.db
-    agents: string[];           // кому раскладываем (round-robin)
+    persona: string;            // целевая персона: round-robin по её активным агентам
     tgstatToken: string;        // токен TGStat (плагин — из pluginConfig, скрипт — из env)
 }
 
@@ -37,7 +38,13 @@ export interface RunResult {
 }
 
 export async function runDiscovery(p: RunParams, log: Logger): Promise<RunResult> {
-    const perAgent: Record<string, number> = Object.fromEntries(p.agents.map((a) => [a, 0]));
+    // Таргетинг по персоне: раскладываем round-robin по её активным агентам.
+    // Нет активных агентов персоны → отказ до сбора, а не пустой прогон (R12).
+    const agents = resolvePersonaTargets(p.persona, p.adminAgentId);
+    if (agents.length === 0) {
+        throw new Error(`в персоне «${p.persona}» нет активных агентов — распределять некому`);
+    }
+    const perAgent: Record<string, number> = Object.fromEntries(agents.map((a) => [a, 0]));
     let collected = 0;
     let cursor = 0; // round-robin курсор по агентам
     let rejectedByAvgReach = 0;
@@ -52,8 +59,9 @@ export async function runDiscovery(p: RunParams, log: Logger): Promise<RunResult
 
             const canonical = normalizeChannelLink(c.link);
 
-            // Дедуп против реестра.
-            if (isKnownChannel(p.adminAgentId, canonical)) continue;
+            // Дедуп в рамках персоны: канал, закреплённый в ЭТОЙ персоне, пропускаем;
+            // тот же канал в другой персоне — валидный кандидат (R4/AC-1).
+            if (getAssignment(p.adminAgentId, p.persona, canonical) !== null) continue;
 
             // Гейт по подписчикам (из выдачи, без доп. запроса).
             if (c.participantsCount < p.minSubscribers) continue;
@@ -105,10 +113,10 @@ export async function runDiscovery(p: RunParams, log: Logger): Promise<RunResult
                 }
             }
 
-            // Прошёл все гейты — назначаем round-robin и фиксируем.
-            const agent = p.agents[cursor % p.agents.length];
-            const { inserted } = registerChannel(p.adminAgentId, canonical, agent);
-            if (!inserted) continue; // уже известен (гонка) — курсор не тратим
+            // Прошёл все гейты — закрепляем round-robin за агентом персоны.
+            const agent = agents[cursor % agents.length];
+            const { assigned } = assignToPersona(p.adminAgentId, { persona: p.persona, canonicalLink: canonical, agentId: agent });
+            if (!assigned) continue; // уже закреплён в этой персоне (гонка) — курсор не тратим
 
             addJoinQueue(agent, [canonical], log);
             perAgent[agent] = (perAgent[agent] ?? 0) + 1;

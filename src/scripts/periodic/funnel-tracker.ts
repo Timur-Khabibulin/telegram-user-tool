@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     try {
         const result = await collectFunnel(
             tg,
-            { window, persist: true, adminAgentId, privateChannelId },
+            { window, persist: true, adminAgentId, privateChannelId, disconnectAfterEachAgent: true },
             log,
         );
 

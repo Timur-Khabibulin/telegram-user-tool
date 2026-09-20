@@ -22,7 +22,7 @@ export interface DistributionTaskRow {
     id: number;
     status: DistributionTaskStatus;
     filePath: string;
-    agentsSpec: string;
+    persona: string;
     requesterId: string;
     addedCount: number;
     skippedCount: number;
@@ -33,7 +33,7 @@ export interface DistributionTaskRow {
 
 export interface CreateDistributionTaskParams {
     filePath: string;
-    agentsSpec: string;
+    persona: string;
     requesterId: string;
 }
 
@@ -51,7 +51,7 @@ function ensureSchema(db: Database.Database): void {
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             status        TEXT    NOT NULL,
             file_path     TEXT    NOT NULL,
-            agents_spec   TEXT    NOT NULL,
+            persona       TEXT    NOT NULL,
             requester_id  TEXT    NOT NULL,
             added_count   INTEGER NOT NULL DEFAULT 0,
             skipped_count INTEGER NOT NULL DEFAULT 0,
@@ -60,13 +60,21 @@ function ensureSchema(db: Database.Database): void {
             finished_at   INTEGER
         );
     `);
+    // channel-multipersona: колонка agents_spec переименована в persona — теперь
+    // хранит имя целевой персоны, а не спек агентов (цель распределения — персона).
+    // Аддитивная миграция существующих БД; таблица уровня прогона, исторических
+    // читателей значения нет.
+    const cols = (db.prepare(`PRAGMA table_info(distribution_tasks)`).all() as { name: string }[]).map((c) => c.name);
+    if (cols.includes("agents_spec") && !cols.includes("persona")) {
+        db.exec(`ALTER TABLE distribution_tasks RENAME COLUMN agents_spec TO persona`);
+    }
 }
 
 function mapRow(row: {
     id: number;
     status: string;
     file_path: string;
-    agents_spec: string;
+    persona: string;
     requester_id: string;
     added_count: number;
     skipped_count: number;
@@ -78,7 +86,7 @@ function mapRow(row: {
         id: row.id,
         status: row.status as DistributionTaskStatus,
         filePath: row.file_path,
-        agentsSpec: row.agents_spec,
+        persona: row.persona,
         requesterId: row.requester_id,
         addedCount: row.added_count,
         skippedCount: row.skipped_count,
@@ -115,11 +123,11 @@ export function createDistributionTask(adminAgentId: string, params: CreateDistr
     const db = openDb(adminAgentId);
     try {
         const result = db.prepare(`
-            INSERT INTO distribution_tasks (status, file_path, agents_spec, requester_id, created_at)
-            VALUES ('running', @filePath, @agentsSpec, @requesterId, @createdAt)
+            INSERT INTO distribution_tasks (status, file_path, persona, requester_id, created_at)
+            VALUES ('running', @filePath, @persona, @requesterId, @createdAt)
         `).run({
             filePath: params.filePath,
-            agentsSpec: params.agentsSpec,
+            persona: params.persona,
             requesterId: params.requesterId,
             createdAt: Math.floor(Date.now() / 1000),
         });

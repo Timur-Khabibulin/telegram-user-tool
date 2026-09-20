@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
-ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/review-listener.ts
+WorkingDirectory=/root/openclaw-plugins/telegram-user-tool
+ExecStart=/root/openclaw-plugins/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/review-listener.ts
 EnvironmentFile=-/root/.openclaw/secrets.env
 Restart=always
 RestartSec=5

@@ -1,0 +1,17 @@
+# Запуск свипа в 14:00 UTC+5 (09:00 UTC) — днём (код авторизации не уходит на
+# аккаунт ночью), с отступом от tg-channel-rotation (07:00 UTC) и tg-daily-summary/
+# tg-funnel-tracker (19:00/19:10 UTC). leave-banned-channels единого времени суток
+# не имеет (per-agent ~180 мин), поэтому час выбран как разумный отступ от суточных
+# задач, а не как гарантия непересечения с каждым прогоном leave-banned.
+# Persistent=true — если VPS был выключен в момент срабатывания, прогон наверстается
+# при следующем старте.
+
+[Unit]
+Description=Telegram auto-reauth sweep timer (14:00 UTC+5 = 09:00 UTC)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

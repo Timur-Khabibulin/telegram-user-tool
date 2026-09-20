@@ -4,39 +4,76 @@
 TBD - created by archiving change tg-agent-autoregistration. Update Purpose after archive.
 ## Requirements
 ### Requirement: Pre-flight validation before any account processing
-The system SHALL validate the persona template and the target agent ID range
-before downloading any tdata archive or mutating any state.
+The system SHALL validate the persona template, the operator-provided 2FA
+password, and the target agent ID range before downloading any tdata archive or
+mutating any state. Persona-template validation SHALL require the channel-only
+files (`post.txt`, `channel_photo.*`, `channel_post_photo.*`) and `channelName`
+only when `createPublicChannel` is set; without it (mode A), those are optional.
+`SOUL.md` is not required.
+
+#### Scenario: 2FA password not provided
+- **WHEN** the operator starts a run without a non-empty `twoFaPassword`
+- **THEN** the system reports an error to the operator and stops without
+  downloading anything
+
+#### Scenario: Persona missing channel files with channel creation disabled
+- **WHEN** `createPublicChannel` is not set and the persona has `default_agent_data.json`,
+  `profile_data.json` (name/nick/birthdate) and at least one `photo_profile_N`, but
+  lacks `post.txt` / `channel_post_photo` / `channelName` / `SOUL.md`
+- **THEN** pre-flight validation passes and registration proceeds (channel-only
+  files are not required in mode A)
+
+#### Scenario: Persona missing channel files with channel creation enabled
+- **WHEN** `createPublicChannel` is set and the persona lacks a channel-only file
+  (`post.txt`, `channel_photo`, `channel_post_photo`) or `channelName`
+- **THEN** pre-flight validation fails and the run stops without downloading anything
 
 #### Scenario: Persona template missing or incomplete
 - **WHEN** the operator starts a run with `personName` and
-  `~/.openclaw/tg-agent-autoregistration/templates/<personName>/` does not
+  `~/.openclaw/personas/<personName>/` does not
   exist or is missing a required file
 - **THEN** the system reports an error to the operator and stops without
   downloading anything
 
 #### Scenario: Agent ID range collides with existing agents or staging
 - **WHEN** the computed range `startAgentNumber..startAgentNumber+N-1`
-  (where `N` is the number of links in `megaLinks`) overlaps with an
+  (where `N` is the number of links in `links`) overlaps with an
   existing `workspace-<agentId>` directory or an unresolved staging entry
   from a previous run
 - **THEN** the system reports an error to the operator and stops without
   downloading anything
 
 #### Scenario: Template valid and range free
-- **WHEN** the persona template is complete and the ID range is free
+- **WHEN** the persona template is complete, `twoFaPassword` is provided, and
+  the ID range is free
 - **THEN** the system proceeds to download tdata archives
 
 ### Requirement: One tdata archive maps to exactly one account
-The system SHALL treat each link in `megaLinks` as exactly one tdata archive
-containing exactly one account, and SHALL download all archives into a
-per-account staging directory before processing any account.
+The system SHALL treat each link in `links` as exactly one tdata archive
+containing exactly one account, regardless of the link's source, and SHALL
+download all archives into a per-account staging directory before processing
+any account. A link MAY be a Mega folder share-link or a Google Drive file
+link; the system SHALL detect the source from the URL and download accordingly.
 
 #### Scenario: Batch download into staging
 - **WHEN** the pre-flight checks pass
-- **THEN** the system downloads every archive from `megaLinks` into
+- **THEN** the system downloads every archive from `links` into
   `~/.openclaw/tg-agent-autoregistration/staging/agent<N>/tdata/` — not into
   `~/.openclaw/workspace-agent<N>/` — one archive per account, before any
   account-level processing begins
+
+#### Scenario: Google Drive file link
+- **WHEN** a link is a Google Drive file link (`drive.google.com/file/d/<id>/...`)
+- **THEN** the system downloads the file (handling Google's large-file
+  confirmation interstitial), unpacks it as a ZIP archive, and locates the
+  `tdata` folder inside the extracted contents
+
+#### Scenario: Google Drive link is not publicly downloadable
+- **WHEN** a Google Drive link does not resolve to a downloadable ZIP (for
+  example the file is not shared for anyone with the link, so an HTML page is
+  returned instead of the archive)
+- **THEN** the system records a failure for that account with a clear error and
+  continues with the remaining accounts, without aborting the whole run
 
 ### Requirement: Mobile proxy selection per account
 
@@ -73,8 +110,9 @@ shared by the selected persona.
 The system SHALL, on the bootstrap session, unconditionally remove any
 existing profile photos and any public channels the account administers,
 change the 2FA password, terminate all other active sessions, and apply the
-persona's profile, photo(s), and channel — before any of this account's
-sessions is used for anything else.
+persona's profile and photo(s) — before any of this account's sessions is used
+for anything else. Creation of the persona's public channel SHALL be conditional
+on the `createPublicChannel` run parameter.
 
 #### Scenario: Prior state is removed unconditionally
 - **WHEN** account setup begins for an account that already has profile
@@ -83,22 +121,28 @@ sessions is used for anything else.
   channels the account administers, regardless of whether the account is
   actually close to any Telegram-imposed public-channel limit
 
-#### Scenario: 2FA password changed from the archive-provided current password
+#### Scenario: 2FA password changed from the operator-provided current password
 - **WHEN** account setup proceeds to the password step
-- **THEN** the system changes the 2FA password using the current password
-  found in the account's own `tdata/Password2FA.txt` and the new password
-  from the persona's `default_agent_data.json`
+- **THEN** the system changes the 2FA password using the operator-provided
+  `twoFaPassword` as the current password and the new password from the
+  persona's `default_agent_data.json`
 
 #### Scenario: All persona profile photos are applied
 - **WHEN** the persona template contains multiple `photo_profile_N` files
 - **THEN** the system uploads every one of them to the account's profile, not
   only the first
 
-#### Scenario: Public channel created and pinned to the profile
-- **WHEN** profile and photos have been applied
+#### Scenario: Public channel created and pinned when enabled
+- **WHEN** `createPublicChannel` is set and profile and photos have been applied
 - **THEN** the system creates a public channel using the persona's
   `channelName`, posts the persona's content to it, and associates it as the
   account's personal (pinned) channel
+
+#### Scenario: No public channel when disabled
+- **WHEN** `createPublicChannel` is not set
+- **THEN** the system completes registration with the persona's profile, photos,
+  username, and second session, but does not create any public channel for the
+  account
 
 #### Scenario: Telegram API rejects a setup step
 - **WHEN** any setup call (2FA change, session reset, cleanup, profile,
@@ -185,12 +229,56 @@ once every artifact for that agent is fully assembled.
   `workspace-agent<N>/` as a single atomic operation
 
 ### Requirement: Batch summary report
-The system SHALL report the outcome of every account processed in a run to
-the operator once the run completes.
+The system SHALL deliver the outcome of every account processed in a run to the
+report-recipient agent's Saved Messages (`REPORT_AGENT_ID`) once the run
+completes — the same destination as the daily run summary — rather than
+returning it synchronously to the invoking tool call.
 
 #### Scenario: Run completes
 - **WHEN** all accounts in the batch have been processed (in any terminal
   status)
-- **THEN** the operator receives a report listing, per account, one of
-  `done` / `proxy_failed` / `setup_failed` / `needs_manual_code`
+- **THEN** the system delivers a report to the Saved Messages of
+  `REPORT_AGENT_ID`, listing, per account, one of `done` / `proxy_failed` /
+  `setup_failed` / `needs_manual_code`
+
+#### Scenario: Report delivery fails
+- **WHEN** the run has completed and recorded each account's terminal status,
+  but delivering the report to Saved Messages fails (for example a transient
+  Telegram/network error)
+- **THEN** the per-account statuses recorded in staging and printed to the run
+  log are preserved, and the delivery error is logged rather than discarding
+  the completed run's result
+
+### Requirement: Detached execution not bound by the agent tool-call watchdog
+The system SHALL execute a batch registration run as a detached background job,
+decoupled from the operator's chat turn, so that the run's duration is not
+bounded by the agent runtime's per-tool-call timeout.
+
+#### Scenario: Operator triggers a batch run
+- **WHEN** an operator triggers a batch registration run
+- **THEN** the system launches the run as a detached background job and returns
+  an acknowledgement immediately, and the run continues after the triggering
+  chat turn has ended
+
+#### Scenario: Run outlives the triggering turn
+- **WHEN** a run takes longer than the agent runtime's per-tool-call timeout
+- **THEN** the run still completes fully and delivers its report, rather than
+  being truncated or killed at that timeout
+
+### Requirement: Account phone and current 2FA obtained without tdata sidecar files
+The system SHALL obtain the account phone number from the live account via
+`getMe()` on the bootstrap session, and the current 2FA password from the
+operator-provided `twoFaPassword`. The system SHALL NOT read the `tdata/Accounts.txt`
+or `tdata/Password2FA.txt` sidecar files; the tdata folder is used only as the
+source of the bootstrap session.
+
+#### Scenario: Phone read from the account, not the archive
+- **WHEN** the bootstrap session is established from tdata
+- **THEN** the system reads the account phone number via `getMe()` and uses it
+  for the second-session sign-in, without reading `tdata/Accounts.txt`
+
+#### Scenario: tdata archive without sidecar files still processes
+- **WHEN** a tdata archive contains no `Accounts.txt` and no `Password2FA.txt`
+- **THEN** account processing proceeds normally, using the phone from `getMe()`
+  and the current 2FA from `twoFaPassword`
 

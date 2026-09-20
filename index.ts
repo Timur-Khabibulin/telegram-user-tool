@@ -18,7 +18,6 @@ import { TelegramService } from "./src/core/telegram/service";
 import type { ProxyConfig } from "./src/core/config";
 import { FUNNEL_ADMIN_AGENT_ID, FUNNEL_PRIVATE_CHANNEL_ID, REPORT_AGENT_ID, listAgentIds, reportsDir } from "./src/core/config";
 import { runDiscovery, renderReport } from "./src/features/discovery/run";
-import { runSimilarDiscovery, renderSimilarReport } from "./src/features/discovery/similar";
 import { runChannelAnalysis, renderStats } from "./src/features/channel-analysis/run";
 import { runChannelContextForAgent, renderChannelContextStats } from "./src/features/channel-context/run";
 import { withLlmLogging } from "./src/core/db/llm-log";
@@ -26,7 +25,7 @@ import { runChannelMetrics } from "./src/features/channel-metrics/run";
 import { cacheChannelIdentities } from "./src/core/channel-sync";
 import { createLlmClient } from "./src/llm/client";
 import { saveReply } from "./src/core/db/replies";
-import { upsertPrivateInviteLink, markPostUpdated, listPendingPostUpdates, listPrivateInviteLinks } from "./src/core/db/private-invites";
+import { runPrivateInviteLinks } from "./src/features/private-invite-links/run";
 import { saveDmHistory, type DmHistoryRecord } from "./src/core/db/dm-history";
 import {
     initChannels,
@@ -72,6 +71,7 @@ import { renderFunnel, buildFunnelCsv, funnelCsvPath } from "./src/features/funn
 import { getAllChannelsWithAvgViews } from "./src/core/db/channels";
 import { runChannelCleanup, type ChannelCleanupParams } from "./src/skills/channel-cleanup";
 import { runAutoregistration, retryManualCode, renderReport as renderAutoregistrationReport } from "./src/features/tg-agent-autoregistration/run";
+import { runChannelSetup, renderChannelSetupReport } from "./src/features/tg-agent-channel-setup/run";
 import { reauthFromTdata } from "./src/features/tg-agent-reauth-from-tdata/run";
 
 // ─── OpenClaw result helpers ──────────────────────────────────────────
@@ -790,9 +790,9 @@ export default definePluginEntry({
             name: "tg_discovery_run",
             description:
                 "Run channel discovery: search TGStat by keywords, filter by min subscribers, " +
-                "dedupe against the registry, assign new channels round-robin across agents, and push them into " +
-                "each agent's join queue. Returns a per-agent report and whether target N was reached. " +
-                "Before calling: agree keywords with the operator. Joining itself is NOT triggered " +
+                "dedupe within the target persona, assign new channels round-robin across the persona's active " +
+                "agents, and push them into each agent's join queue. Returns a per-agent report and whether target N " +
+                "was reached. Before calling: agree keywords with the operator. Joining itself is NOT triggered " +
                 "here — the per-agent join-queue timer does it.",
             parameters: Type.Object({
                 keywords: Type.Array(Type.String(), { description: "Agreed search keywords" }),
@@ -800,16 +800,15 @@ export default definePluginEntry({
                 minSubscribers: Type.Number({ description: "Minimum subscribers threshold" }),
                 minAvgPostReach: Type.Optional(Type.Number({ description: "Minimum average post reach from TGStat (avg_post_reach). If not set, the gate is not applied." })),
                 avgReachAgentId: Type.Optional(Type.String({ description: "Agent ID to use for manual reach calculation via Telegram when TGStat data is unavailable." })),
-                agents: Type.Optional(Type.Array(Type.String(), { description: "Agents to distribute to. Default: all agents." })),
+                persona: Type.String({ description: "Target persona: channels are distributed round-robin across this persona's active agents." }),
                 adminAgentId: Type.Optional(Type.String({ description: "Registry owner (discovery.db). Default: admin agent." })),
             }),
             execute: (
                 _id: string,
-                params: { keywords: string[]; n: number; minSubscribers: number; minAvgPostReach?: number; avgReachAgentId?: string; agents?: string[]; adminAgentId?: string },
+                params: { keywords: string[]; n: number; minSubscribers: number; minAvgPostReach?: number; avgReachAgentId?: string; persona: string; adminAgentId?: string },
             ) =>
                 run("tg_discovery_run", async () => {
-                    const agents = params.agents && params.agents.length > 0 ? params.agents : listAgentIds();
-                    if (agents.length === 0) throw new Error("no agents to distribute to");
+                    if (!params.persona) throw new Error("persona is required");
                     if (!tgstatToken) {
                         throw new Error(
                             "tgstatToken not configured: set plugins.entries.telegram-user-tool.config.tgstatToken (or TGSTAT_TOKEN env)",
@@ -828,7 +827,7 @@ export default definePluginEntry({
                             avgReachAgentId: params.avgReachAgentId,
                             telegramService: params.avgReachAgentId ? tg : undefined,
                             adminAgentId: params.adminAgentId ?? FUNNEL_ADMIN_AGENT_ID,
-                            agents,
+                            persona: params.persona,
                             tgstatToken,
                         },
                         log,
@@ -837,75 +836,11 @@ export default definePluginEntry({
                 }),
         });
 
-        // ── tg_discovery_similar_run ──────────────────────────────────
-        // Обход похожих каналов через рекомендации Telegram (MTProto), отдельно
-        // от TGStat. Последовательно по агентам на их сессиях. Вступление не
-        // запускает. Операторский диалог (собрать min_subscribers, опц. агентов)
-        // ведёт агент в чате; этот тул — только детерминированный обход.
-        reg({
-            name: "tg_discovery_similar_run",
-            description:
-                "Run similar-channel discovery via Telegram's native recommendations (MTProto), complementing TGStat. " +
-                "Two phases. COLLECT: seed channels of all searcher agents are pooled and ranked globally by audience " +
-                "engagement (median post views / subscribers over a recent-posts window), then the recommendation graph " +
-                "is crawled strictly by levels (batched per searcher within a level; each seed's branch runs on its " +
-                "searcher's session), gating candidates by min subscribers, a linked discussion group, engagement " +
-                "(avg views per post and ER over a window) and topic relevance, deduping against the registry, until " +
-                "target × N channels are collected (N = number of platform agents). A searcher's crawl stops after " +
-                "2 consecutive FLOOD_WAITs. DISTRIBUTE: the pool is spread round-robin across all platform agents (up " +
-                "to `target` each), assigning each channel to one agent (registry) and pushing it into that agent's " +
-                "join queue. " +
-                "Candidates are gated, in order: min subscribers; presence of a linked discussion group; engagement " +
-                "(avg views per post and ER, computed over the channel's recent posts minus the 2 freshest, kept when " +
-                "both are strictly above their thresholds — fail-closed if too few posts to measure); topic relevance " +
-                "(LLM scores the channel against the run `theme` 0..1; kept when score > minTopicScore, fail-closed). " +
-                "Seed engagement affects crawl order only, not selection. No keywords. " +
-                "Joining itself is NOT triggered here — the per-agent join-queue timer does it. " +
-                "Returns how many channels were collected against the goal, the per-agent distribution and skip counts.",
-            parameters: Type.Object({
-                minSubscribers: Type.Number({ description: "Minimum subscribers threshold" }),
-                target: Type.Number({ description: "Target number of new channels per platform agent; total goal = target × N" }),
-                agents: Type.Array(Type.String(), { description: "Searcher agents whose sessions and seed channels drive the crawl (required)" }),
-                theme: Type.String({ description: "Run topic (single for all agents); candidates are scored for relevance to it (required)" }),
-                minAvgViews: Type.Number({ description: "Minimum average views per post (strict >), over the channel's recent posts minus the 2 freshest. No default — set per niche/language (required)." }),
-                adminAgentId: Type.Optional(Type.String({ description: "Registry owner (discovery.db). Default: admin agent." })),
-                minTopicScore: Type.Optional(Type.Number({ description: "Topic relevance threshold (strict >), measured as the share of channel content matching the theme. Default: 0.5." })),
-                postsCount: Type.Optional(Type.Number({ description: "Number of latest channel posts fetched per channel — shared window for engagement scoring and topic scoring (> 2). Default: 20." })),
-                minEngagementRate: Type.Optional(Type.Number({ description: "Minimum engagement rate (strict >), avg views per post / subscribers. Default: 0.1." })),
-            }),
-            execute: (
-                _id: string,
-                params: { minSubscribers: number; target: number; agents: string[]; theme: string; minAvgViews: number; adminAgentId?: string; minTopicScore?: number; postsCount?: number; minEngagementRate?: number },
-            ) =>
-                run("tg_discovery_similar_run", async () => {
-                    const searchers = params.agents ?? [];
-                    if (searchers.length === 0) throw new Error("no searcher agents specified");
-                    const theme = params.theme?.trim() ?? "";
-                    if (theme.length === 0) throw new Error("no theme specified");
-                    const allAgents = listAgentIds();
-                    if (allAgents.length === 0) throw new Error("no platform agents to distribute to");
-                    const postsCount = params.postsCount ?? 20;
-                    if (!Number.isFinite(postsCount) || postsCount <= 2) throw new Error("postsCount must be > 2");
-                    if (!Number.isFinite(params.minAvgViews)) throw new Error("minAvgViews is required");
-                    const result = await runSimilarDiscovery(
-                        {
-                            minSubscribers: params.minSubscribers,
-                            target: params.target,
-                            adminAgentId: params.adminAgentId ?? FUNNEL_ADMIN_AGENT_ID,
-                            searchers,
-                            allAgents,
-                            theme,
-                            minTopicScore: params.minTopicScore ?? 0.5,
-                            postsCount,
-                            minEngagementRate: params.minEngagementRate ?? 0.1,
-                            minAvgViews: params.minAvgViews,
-                            llm: createLlmClient(),
-                        },
-                        log,
-                    );
-                    return { report: renderSimilarReport(result), ...result };
-                }),
-        });
+        // tg_discovery_similar_run — УДАЛЁН (channel-multipersona, 2026-09-13):
+        // similar-дискавери депрекейтнут и не переведён на per-persona реестр
+        // (features/discovery/similar.ts пишет по старой модели). Полный выпил —
+        // отдельная под-задача; тул отвязан от плагина, чтобы не грузить устаревший
+        // код и не ломать загрузку удалёнными функциями реестра.
 
         // ── tg_channel_content_analysis ──────────────────────────────
         // По запросу оператора: для каждого агента берём его broadcast-каналы (из
@@ -1404,134 +1339,7 @@ export default definePluginEntry({
                 ),
             }),
             execute: (_id: string, params: { agentIds?: string[]; retryPendingOnly?: boolean; verifyOnly?: boolean }) =>
-                run("tg_private_invite_links", async () => {
-                    if (params.verifyOnly && params.retryPendingOnly) {
-                        throw new Error("verifyOnly и retryPendingOnly нельзя использовать одновременно");
-                    }
-
-                    if (params.verifyOnly) {
-                        const registry = listPrivateInviteLinks(FUNNEL_ADMIN_AGENT_ID);
-                        const targets = params.agentIds && params.agentIds.length > 0
-                            ? registry.filter((r) => params.agentIds!.includes(r.agentId))
-                            : registry;
-
-                        const matched: string[] = [];
-                        const mismatched: Record<string, { dbLink: string; postLinks: string[] }> = {};
-                        const verifyErrors: Record<string, string> = {};
-
-                        for (const row of targets) {
-                            try {
-                                tg.loadAccount(row.agentId);
-                                const res = await tg.getPersonalChannelPostLinks();
-                                if (!res.ok) {
-                                    verifyErrors[row.agentId] = res.reason;
-                                    log.warn(`[tg_private_invite_links] verify failed for agent=${row.agentId}: ${res.reason}`);
-                                    continue;
-                                }
-                                if (res.links.includes(row.inviteLink)) {
-                                    matched.push(row.agentId);
-                                } else {
-                                    mismatched[row.agentId] = { dbLink: row.inviteLink, postLinks: res.links };
-                                    log.warn(`[tg_private_invite_links] mismatch for agent=${row.agentId}: db=${row.inviteLink} post=${JSON.stringify(res.links)}`);
-                                }
-                            } catch (err: any) {
-                                const message = err.message ?? String(err);
-                                verifyErrors[row.agentId] = message;
-                                log.warn(`[tg_private_invite_links] verify error for agent=${row.agentId}: ${message}`);
-                            }
-                        }
-
-                        const lines: string[] = [
-                            `Проверено: ${targets.length}, совпадает: ${matched.length}, ` +
-                                `расхождение: ${Object.keys(mismatched).length}, ошибка: ${Object.keys(verifyErrors).length}`,
-                        ];
-                        if (Object.keys(mismatched).length > 0) {
-                            lines.push("Расхождения (ссылка в БД ≠ ссылка(и) в посте):");
-                            for (const [agentId, m] of Object.entries(mismatched)) {
-                                lines.push(`  ${agentId}: БД=${m.dbLink} пост=[${m.postLinks.join(", ") || "нет ссылок"}]`);
-                            }
-                        }
-                        if (Object.keys(verifyErrors).length > 0) {
-                            lines.push("Ошибки проверки:");
-                            for (const [agentId, err] of Object.entries(verifyErrors)) lines.push(`  ${agentId}: ${err}`);
-                        }
-
-                        return { text: lines.join("\n"), matched, mismatched, verifyErrors };
-                    }
-
-                    const { retryPendingOnly } = params;
-                    const now = Math.floor(Date.now() / 1000);
-                    const created: Record<string, string> = {};
-                    const createErrors: Record<string, string> = {};
-
-                    if (retryPendingOnly) {
-                        // Повтор: ссылки уже есть в реестре, шаг создания не выполняется.
-                        for (const row of listPendingPostUpdates(FUNNEL_ADMIN_AGENT_ID)) {
-                            created[row.agentId] = row.inviteLink;
-                        }
-                    } else {
-                        if (!params.agentIds || params.agentIds.length === 0) {
-                            throw new Error("agentIds обязателен, если retryPendingOnly не задан");
-                        }
-                        // Шаг 1 — создать ссылки от имени REPORT_AGENT_ID, сохранить под
-                        // FUNNEL_ADMIN_AGENT_ID (владелец платформенных данных).
-                        tg.loadAccount(REPORT_AGENT_ID);
-                        for (const agentId of params.agentIds) {
-                            try {
-                                const { link } = await tg.exportChatInvite(FUNNEL_PRIVATE_CHANNEL_ID, { title: agentId });
-                                upsertPrivateInviteLink(FUNNEL_ADMIN_AGENT_ID, agentId, link, now);
-                                created[agentId] = link;
-                                log.info(`[tg_private_invite_links] link created for agent=${agentId}: ${link}`);
-                            } catch (err: any) {
-                                const message = err.message ?? String(err);
-                                createErrors[agentId] = message;
-                                log.warn(`[tg_private_invite_links] link creation failed for agent=${agentId}: ${message}`);
-                            }
-                        }
-                    }
-
-                    // Шаг 2 — от имени каждого целевого агента вставить его ссылку в его
-                    // собственный пост. Общий для обоих режимов — created уже заполнен либо
-                    // свежесозданными, либо взятыми из реестра ссылками.
-                    const inserted: string[] = [];
-                    const insertSkipped: Record<string, string> = {};
-                    for (const agentId of Object.keys(created)) {
-                        try {
-                            tg.loadAccount(agentId);
-                            const res = await tg.updatePersonalChannelPostLink(created[agentId]);
-                            if (res.ok) {
-                                inserted.push(agentId);
-                                markPostUpdated(FUNNEL_ADMIN_AGENT_ID, agentId);
-                                log.info(`[tg_private_invite_links] post updated for agent=${agentId}`);
-                            } else {
-                                insertSkipped[agentId] = res.reason;
-                                log.warn(`[tg_private_invite_links] post not updated for agent=${agentId}: ${res.reason}`);
-                            }
-                        } catch (err: any) {
-                            const message = err.message ?? String(err);
-                            insertSkipped[agentId] = message;
-                            log.warn(`[tg_private_invite_links] post update failed for agent=${agentId}: ${message}`);
-                        }
-                    }
-
-                    const lines: string[] = [];
-                    if (retryPendingOnly) {
-                        lines.push(`Повтор для агентов с post_updated=0: ${Object.keys(created).length}`);
-                    } else {
-                        lines.push(`Ссылки созданы: ${Object.keys(created).length}/${params.agentIds!.length}`);
-                    }
-                    lines.push(`Вставлены в пост: ${inserted.length}/${Object.keys(created).length}`);
-                    if (Object.keys(createErrors).length > 0) {
-                        lines.push("Ошибки создания ссылки:");
-                        for (const [agentId, err] of Object.entries(createErrors)) lines.push(`  ${agentId}: ${err}`);
-                    }
-                    if (Object.keys(insertSkipped).length > 0) {
-                        lines.push("Не вставлено в пост (post_updated остаётся 0):");
-                        for (const [agentId, reason] of Object.entries(insertSkipped)) lines.push(`  ${agentId}: ${reason}`);
-                    }
-
-                    return { text: lines.join("\n"), created, inserted, createErrors, insertSkipped };
-                }),
+                run("tg_private_invite_links", () => runPrivateInviteLinks(params, tg, log)),
         });
 
         // ── tg_channel_cleanup ────────────────────────────────────────
@@ -1563,24 +1371,28 @@ export default definePluginEntry({
             name: "tg_agent_autoregistration_run",
             description:
                 "Массовая автоматическая регистрация Telegram-агентов из готовых tdata-сессий. " +
-                "Один вызов обрабатывает всю пачку последовательно и детерминированно (без " +
-                "пошагового диалога) — подбирает мобильный прокси, готовит аккаунт (2FA, очистка " +
-                "прежних фото/каналов, профиль, канал персоны), регистрирует вторую MTProto-сессию, " +
-                "переносит готовый агент в workspace-agent<N>. Возвращает статус по каждому аккаунту: " +
-                "done / proxy_failed / setup_failed / needs_manual_code.",
+                "Ссылки на архивы (links) — Mega folder-share или Google Drive file-ссылка, по одной на " +
+                "аккаунт; вид источника определяется автоматически. Текущий 2FA-пароль пачки задаётся " +
+                "параметром twoFaPassword (один на прогон). Один вызов обрабатывает всю пачку " +
+                "последовательно и детерминированно (без пошагового диалога) — подбирает мобильный " +
+                "прокси, готовит аккаунт (2FA, очистка прежних фото/каналов, профиль, канал персоны), " +
+                "регистрирует вторую MTProto-сессию, переносит готовый агент в workspace-agent<N>. " +
+                "Возвращает статус по каждому аккаунту: done / proxy_failed / setup_failed / needs_manual_code.",
             parameters: Type.Object({
-                megaLinks: Type.Array(Type.String(), { description: "Ссылки на tdata-архивы в Mega, одна на аккаунт" }),
+                links: Type.Array(Type.String(), { description: "Ссылки на tdata-архивы (Mega folder-share или Google Drive file-ссылка), одна на аккаунт" }),
+                twoFaPassword: Type.String({ description: "Текущий 2FA-пароль аккаунтов пачки (один на весь прогон)" }),
+                createPublicChannel: Type.Optional(Type.Boolean({ description: "Создавать публичный канал персоны при реге (mode B, по умолчанию true). false = mode A: рега без канала, канал создаётся позже тулом tg_agent_channel_setup", default: true })),
                 startAgentNumber: Type.Number({ description: "Номер первого создаваемого агента (agent<N>)" }),
                 proxyRegion: Type.String({ description: "Регион мобильного прокси для asocks" }),
                 maxProxyAttempts: Type.Number({ description: "Максимум попыток подбора прокси на аккаунт" }),
-                personName: Type.String({ description: "Имя персоны — шаблон в ~/.openclaw/tg-agent-autoregistration/templates/<personName>/" }),
+                personName: Type.String({ description: "Имя персоны — шаблон в ~/.openclaw/personas/<personName>/" }),
             }),
             execute: (
                 _id: string,
-                params: { megaLinks: string[]; startAgentNumber: number; proxyRegion: string; maxProxyAttempts: number; personName: string },
+                params: { links: string[]; twoFaPassword: string; createPublicChannel?: boolean; startAgentNumber: number; proxyRegion: string; maxProxyAttempts: number; personName: string },
             ) =>
                 run("tg_agent_autoregistration_run", async () => {
-                    const report = await runAutoregistration(params, log);
+                    const report = await runAutoregistration({ ...params, createPublicChannel: params.createPublicChannel ?? true }, log);
                     return { text: renderAutoregistrationReport(report), results: report.results, abortReason: report.abortReason };
                 }),
         });
@@ -1607,6 +1419,27 @@ export default definePluginEntry({
                 run("tg_agent_autoregistration_retry_code", () =>
                     retryManualCode(params.agentId, params.personName, params.proxyRegion, params.maxProxyAttempts, log),
                 ),
+        });
+
+        // ── tg_agent_channel_setup ──────────────────────────────────────
+
+        reg({
+            name: "tg_agent_channel_setup",
+            description:
+                "Создаёт публичный канал персоны для УЖЕ зарегистрированных агентов (batch). " +
+                "Для каждого agentId подключается через сохранённую сессию агента, читает персону " +
+                "и username из его tg-account.json, создаёт публичный канал и закрепляет его в " +
+                "профиле. Агенты, у которых personal-канал уже есть, пропускаются (skipped) — " +
+                "повторный прогон безопасен. Приватные ссылки не трогает (для них — " +
+                "tg_private_invite_links отдельным шагом). Возвращает статус по каждому: done / skipped / failed.",
+            parameters: Type.Object({
+                agentIds: Type.Array(Type.String(), { description: "Список agentId уже зарегистрированных агентов, например [\"agent40\",\"agent41\"]" }),
+            }),
+            execute: (_id: string, params: { agentIds: string[] }) =>
+                run("tg_agent_channel_setup", async () => {
+                    const report = await runChannelSetup(params.agentIds, log);
+                    return { text: renderChannelSetupReport(report), results: report.results };
+                }),
         });
 
         // ── tg_agent_reauth_from_tdata ───────────────────────────────────

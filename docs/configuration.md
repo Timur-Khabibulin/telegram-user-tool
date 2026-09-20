@@ -94,6 +94,9 @@ dotenv-загрузки в коде — переменные должны быт
 | `TELEGRAM_REVIEW_CHAT_ID` | id чата ревьюеров, куда бот шлёт запросы на подтверждение | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
 | `CHANNEL_DISTRIBUTION_BOT_TOKEN` | токен отдельного Bot API-бота распределения каналов (channel-distribution) — один на платформу, отдельный от ревью-бота (лимит один `getUpdates` на токен) | `src/core/distribution-bot-api.ts` (через `src/core/config.ts`) |
 | `CHANNEL_DISTRIBUTION_CHAT_ID` | id уполномоченного чата, из которого бот принимает команды и CSV (авторизация по чату, default-deny) | `src/core/distribution-bot-api.ts` (через `src/core/config.ts`) |
+| `GOOGLE_SHEETS_KEY_PATH` | путь к JSON-ключу сервис-аккаунта Google для конвейера метрик (channel-metrics-pipeline); таблица расшарена на его email как Редактор | `src/core/google-sheets.ts` (через `src/core/config.ts`) |
+| `CHANNELS_SHEET_ID` | ID Google-таблицы с листом анализированных каналов (дедуп входа и запись результата) | `src/core/google-sheets.ts` (через `src/core/config.ts`) |
+| `CHANNELS_SHEET_NAME` | имя целевого листа; по умолчанию `all-processed-channels`, задавать только если лист переименован | `src/core/google-sheets.ts` (через `src/core/config.ts`) |
 
 Файл подключён как `EnvironmentFile=-/root/.openclaw/secrets.env` в плановых
 systemd-юнитах (`deploy/systemd/tg-agent@.service`, `tg-daily-summary.service`,

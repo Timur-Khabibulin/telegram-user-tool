@@ -1,9 +1,11 @@
 ---
 name: telegram-group-monitor
-description: "Telegram group monitoring algorithm. Initializes and syncs the channels database, then reads unread messages from due chats, analyzes topics against the agent's persona, and replies to relevant messages. Use this skill when the agent needs to monitor telegram groups, read unread messages, analyze chat topics, or reply to group messages on behalf of the agent's persona. Triggers: 'monitor telegram groups', 'read telegram groups', 'reply to telegram messages', 'check telegram chats', 'telegram group agent'."
+description: "DEPRECATED — выведен из эксплуатации. Telegram group monitoring algorithm. Initializes and syncs the channels database, then reads unread messages from due chats, analyzes topics against the agent's persona, and replies to relevant messages. Use this skill when the agent needs to monitor telegram groups, read unread messages, analyze chat topics, or reply to group messages on behalf of the agent's persona. Triggers: 'monitor telegram groups', 'read telegram groups', 'reply to telegram messages', 'check telegram chats', 'telegram group agent'."
 ---
 
 # Telegram Group Monitor
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Алгоритм выполнения
 

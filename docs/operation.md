@@ -40,14 +40,14 @@
 
 | Репозиторий | Сервер                                          |
 |---|-------------------------------------------------|
-| `index.ts` | `~/.openclaw/extensions/telegram-user-tool/index.ts` |
-| `src/` | `~/.openclaw/extensions/telegram-user-tool/src` |
+| `index.ts` | `~/openclaw-plugins/telegram-user-tool/index.ts` |
+| `src/` | `~/openclaw-plugins/telegram-user-tool/src` |
 | `skills/` | `~/.openclaw/workspace/skills/`                 |
 | `deploy/systemd/*` | `/etc/systemd/system/`                          |
 | `openclaw.json` | `~/.openclaw/openclaw.json`                     |
 
 Точка входа плагина — `index.ts` в корне репозитория и в корне расширения
-(`~/.openclaw/extensions/telegram-user-tool/index.ts`), а не в `src/`: OpenClaw
+(`~/openclaw-plugins/telegram-user-tool/index.ts`), а не в `src/`: OpenClaw
 обнаруживает плагины по `~/.openclaw/extensions/<name>/index.ts` (см.
 `openclaw/docs/tools/plugin.md`). Импорты в нём указывают на `./src/core/...`.
 
@@ -72,6 +72,7 @@
 | `tasks.db` | расписание задач и журнал прогонов |
 | `funnel.db` | метрики воронки (только у агента `FUNNEL_ADMIN_AGENT_ID`) |
 | `discovery.db` | реестр найденных каналов channel-discovery (только у агента `FUNNEL_ADMIN_AGENT_ID`) |
+| `channel-operations.db` | журнал операций над каналами channel-operations-history (только у агента `FUNNEL_ADMIN_AGENT_ID`) |
 | `reports/` | CSV-отчёты: анализ контента `channel-analysis-<UTC-ts>.csv`, воронка `funnel-<день>_<время>.csv` (только у агента `FUNNEL_ADMIN_AGENT_ID`) |
 | `private-invites.db` | реестр персональных инвайт-ссылок в приватный канал (только у агента `FUNNEL_ADMIN_AGENT_ID`), создаются от имени `REPORT_AGENT_ID` |
 
@@ -83,8 +84,19 @@
 выполняющий рабочих задач: исключён из `listAgentIds()`, не запускается диспетчером и не
 ставится в расписание.
 
-Пути формируются в `src/core/config.ts`. Список агентов (за исключением
-`REPORT_AGENT_ID`) определяется по каталогам `workspace-<agentId>`.
+В Saved Messages `REPORT_AGENT_ID`, помимо ежедневной сводки и воронки, приходят
+итоговые отчёты операторских прогонов, запускаемых отсоединённо (`systemd-run` поверх
+ops-скрипта, отчёт по завершении шлётся туда же через `sendSavedMessage`):
+- массовая автрегистрация (`tg-agent-autoregistration`) — per-account статус;
+- реавторизация через tdata (`tg-agent-reauth-from-tdata`) — терминальный статус прогона;
+- персональные инвайт-ссылки (`private-invite-links`) — сводка по режиму.
+
+Пути формируются в `src/core/config.ts`. Список рабочих агентов (за исключением
+`REPORT_AGENT_ID`) определяется по каталогам `workspace-agent<N>` (`listAgentIds`).
+Каталоги пула пустых аккаунтов `workspace-emptyAccount<N>` (авторизованная сессия +
+`tdata/`) в этот список не входят — они невидимы рабочему контуру и перечисляются
+отдельно (`listPoolAccountIds`), потребляются свипом авто-замены
+(banned-account-replacement); карантин невалидного пул-аккаунта — суффикс `.invalid`.
 
 ### Персона `~/.openclaw/personas/<personName>/`
 
@@ -116,8 +128,10 @@ workspace агента. Правка `SOUL.md` шаблона применяет
 | `tg-funnel-tracker.service/.timer` | oneshot/timer | `19:10 UTC` | сбор воронки |
 | `tg-channel-activity-update.service/.timer` | oneshot/timer | `03:00 UTC` (ежедневно) | пересчёт охвата канала (avg_views/subs_count) и активности чата (active_writers_p50/p90) — TTL 30 дней на канал по каждой группе метрик независимо |
 | `tg-channel-rotation.service/.timer` | oneshot/timer | `07:00 UTC` (ежедневно) | ротация каналов, покинутых из-за бана (`leaved_from_banned`) — перенос менее загруженному активному агенту |
+| `tg-reauth-sweep.service/.timer` | oneshot/timer | `09:00 UTC` (ежедневно) | авто-реавторизация агентов с `need_update_session` через tdata: успех — ограничение снято; нет tdata / не подошёл 2FA — `manual_reauth`; ошибка-бан — `banned`; транзиентные — ретрай след. прогоном. Наблюдаемость — только journal |
+| `tg-banned-replacement-sweep.service/.timer` | oneshot/timer | `11:00 UTC` (ежедневно) | авто-замена забаненных аккаунтов из пула пустых (banned-account-replacement): каждому агенту с активным `banned` подставляется пустой аккаунт из `workspace-emptyAccount*` (agentId и персона сохраняются), новый аккаунт настраивается под персону, включается прогрев, join-queue наполняется из реестра владения (старт +1д), на +3д — monitor-v5 on / warmup off. Тот же прогон исполняет назревшие отложенные переходы. Пул пуст → алерт один раз в Saved Messages report-агента. Наблюдаемость — journal |
 | `tg-review-listener.service` | simple, `Restart=always` | — (постоянно работает) | ручное ревью комментариев: единственный потребитель `getUpdates` общего Bot API-бота (post-comment-review), не по таймеру |
-| `tg-distribution-listener.service` | simple, `Restart=always` | — (постоянно работает) | распределение каналов по агентам через Telegram-бот (channel-distribution): приём CSV, балансировка, постановка в join-queue; отдельный bot-токен, не по таймеру. Загруженные файлы — в `~/.openclaw/workspace-agent1/distribution-uploads/`, история прогонов — `channel-distribution.db`, журнал — journald |
+| `tg-distribution-listener.service` | simple, `Restart=always` | — (постоянно работает) | распределение каналов по агентам через Telegram-бот (channel-distribution): приём CSV, балансировка, постановка в join-queue; отдельный bot-токен, не по таймеру. Загруженные файлы — в `~/.openclaw/workspace-agent1/distribution-uploads/`, история прогонов — `channel-distribution.db`, журнал — journald. **Также ведёт конвейер метрик** (channel-metrics-pipeline): команды `/metrics` (CSV ссылок + `agents:` и `filter:` в подписи одним сообщением) и `/metrics_status`. Тяжёлый расчёт идёт отдельным detached-процессом `src/scripts/ops/metrics-pipeline-worker.ts` (наследует окружение слушателя, в т.ч. `GOOGLE_SHEETS_*`): дедуп против Google-листа → все метрики волнами по пулу агентов → фильтр → запись в лист → CSV прошедших в чат. Файлы прогона — `~/.openclaw/workspace-agent1/channel-metrics-pipeline/`, задачи — `channel-metrics-pipeline.db` |
 
 Установка шаблонов:
 
@@ -230,7 +244,7 @@ LLM — primary через codex-подписку (`~/.openclaw/codex-auth/auth.
 с Windows через `scp`/`tar`, получают чужой uid, поэтому после деплоя плагина:
 
 ```bash
-ssh -i ~/.ssh/vps_key root@<host> "chown -R root:root ~/.openclaw/extensions/telegram-user-tool"
+ssh -i ~/.ssh/vps_key root@<host> "chown -R root:root ~/openclaw-plugins/telegram-user-tool"
 ```
 
 Затем — рестарт gateway, чтобы подхватить изменения: `openclaw gateway restart`.

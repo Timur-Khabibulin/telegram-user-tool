@@ -439,14 +439,28 @@ function csvEscapeField(s: string): string {
 ### 5.1 Новая функция в `db/tasks.ts`
 
 ```ts
-/** Активен ли агент (US-4): включена задача monitor или monitor-v2 на текущий
- *  момент — читает tasks.db агента, без учёта истории включённости за день. */
+/** Активен ли агент (US-4): включён хотя бы один монитор (monitor/monitor-v2…v5)
+ *  ИЛИ account-warmup на текущий момент — читает tasks.db агента, без учёта
+ *  истории включённости за день. */
 export function isAgentActive(agentId: string): boolean {
     return listTasks(agentId).some(
-        (t) => (t.type === "monitor" || t.type === "monitor-v2") && t.enabled === 1,
+        (t) =>
+            (t.type === "monitor" ||
+                t.type === "monitor-v2" ||
+                t.type === "monitor-v3" ||
+                t.type === "monitor-v4" ||
+                t.type === "monitor-v5" ||
+                t.type === "account-warmup") &&
+            t.enabled === 1,
     );
 }
 ```
+
+> Критерий с тех пор расширен: помимо мониторов всех версий агент считается
+> активным и при включённом `account-warmup` — агент на прогреве (ещё без
+> монитора) должен попадать в цели дискавери/распределения/ротации
+> (`resolvePersonaTargets`) и в обход воронки. `isAgentActive` — общий предикат
+> для обоих потоков.
 
 Переиспользует существующий `listTasks` (уже открывает `tasks.db`,
 идемпотентно создаёт схему) — не отдельный SQL-запрос, не новая БД-функция

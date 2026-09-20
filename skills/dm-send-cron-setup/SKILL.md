@@ -1,9 +1,11 @@
 ---
 name: dm-send-cron-setup
-description: "Creates a cron job for daily DM outreach sending for a given agent. Use when the user wants to set up a scheduled DM sending task (Cron 2) for a specific agent."
+description: "DEPRECATED — выведен из эксплуатации. Creates a cron job for daily DM outreach sending for a given agent. Use when the user wants to set up a scheduled DM sending task (Cron 2) for a specific agent."
 ---
 
 # DM Send Cron Setup
+
+> **DEPRECATED.** Скилл выведен из эксплуатации, использовать не нужно.
 
 ## Шаг 1 — Определить agentId
 

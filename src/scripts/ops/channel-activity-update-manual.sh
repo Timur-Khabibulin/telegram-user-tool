@@ -22,7 +22,7 @@ case "$INSTANCE" in
 esac
 AGENTS="${AGENTS//-/,}"
 
-cd /root/.openclaw/extensions/telegram-user-tool
+cd /root/openclaw-plugins/telegram-user-tool
 
 ARGS=(--agents "$AGENTS")
 if [ -n "$LIMIT" ]; then

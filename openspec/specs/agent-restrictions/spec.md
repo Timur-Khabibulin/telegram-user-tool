@@ -11,10 +11,11 @@ workspace административного агента (`FUNNEL_ADMIN_AGENT_I
 приёму, что `funnel.db`/`discovery.db`/`private-invites.db`. Одна строка на
 `agentId`: наличие строки означает, что агент ограничен, отсутствие — что
 нет. Поля: `agentId` (PK), `restriction_type` (`banned` |
-`need_update_session` | `suspend`), `reason` (сырой `errorMessage` или
-фиксированная строка `"channels_banned"` — см. правило «2 канала banned за 2
-дня»), `restriction_duration` (секунды; `NULL` = бессрочно), `restricted_at`
-(unix-время создания).
+`need_update_session` | `suspend` | `manual_reauth`), `reason` (сырой
+`errorMessage` или фиксированная строка — `"channels_banned"` для правила «10
+каналов banned за сутки», `"дефолтный 2FA-пароль не подошёл"` для перевода
+свипом реавторизации в `manual_reauth`), `restriction_duration` (секунды;
+`NULL` = бессрочно), `restricted_at` (unix-время создания).
 
 #### Scenario: Строка создаётся при первом срабатывании триггера
 - **WHEN** для агента без активного ограничения происходит одно из событий
@@ -28,6 +29,12 @@ workspace административного агента (`FUNNEL_ADMIN_AGENT_I
   «Диспетчер проверяет ограничение перед запуском задач»), поэтому ошибки,
   порождающие новое основание для ограничения, не могут произойти, пока
   текущее ограничение активно
+
+#### Scenario: manual_reauth хранится как бессрочное ограничение
+- **WHEN** свип реавторизации переводит агента в `manual_reauth`
+- **THEN** строка `agent_restrictions` агента имеет `restriction_type =
+  manual_reauth` и `restriction_duration = NULL` (бессрочно, до ручного
+  снятия)
 
 ### Requirement: Триггеры создания ограничения
 
@@ -75,9 +82,15 @@ workspace административного агента (`FUNNEL_ADMIN_AGENT_I
 
 Диспетчер SHALL проверять `agent_restrictions` для `agentId` прогона перед
 подключением к Telegram, после проверки назревших задач. Активная запись
-(`banned`/`need_update_session` — всегда; `suspend` — пока `restricted_at +
-restriction_duration > now`) SHALL останавливать прогон без подключения к
-Telegram и без вызова LLM — задачи не выполняются в этом прогоне.
+(`banned`/`need_update_session`/`manual_reauth` — всегда; `suspend` — пока
+`restricted_at + restriction_duration > now`) SHALL останавливать прогон без
+подключения к Telegram и без вызова LLM — задачи не выполняются в этом прогоне.
+
+#### Scenario: manual_reauth останавливает прогон
+- **WHEN** у агента активна строка `agent_restrictions` с `restriction_type =
+  manual_reauth`
+- **THEN** диспетчер останавливает прогон агента без подключения к Telegram и
+  без вызова LLM, как и для `banned`/`need_update_session`
 
 #### Scenario: Ограниченный агент не подключается
 - **WHEN** у агента есть активное ограничение любого типа
@@ -91,8 +104,11 @@ Telegram и без вызова LLM — задачи не выполняются
 
 ### Requirement: Снятие ограничения
 
-`banned` и `need_update_session` SHALL сниматься только вручную (прямое
-удаление строки человеком). `suspend` SHALL сниматься автоматически, когда
+`banned` SHALL сниматься автоматически — по успешному завершению авто-замены
+аккаунта (sweep `banned-account-replacement` снимает ограничение последним шагом,
+после успешной активации нового аккаунта) — либо вручную (прямое удаление строки
+человеком). `need_update_session` SHALL сниматься только вручную либо успешной
+реавторизацией. `suspend` SHALL сниматься автоматически, когда
 `restricted_at + restriction_duration <= now`.
 
 #### Scenario: Suspend снимается автоматически
@@ -100,9 +116,15 @@ Telegram и без вызова LLM — задачи не выполняются
   запуском задач
 - **THEN** строка удаляется, задачи агента возобновляются в этом же прогоне
 
-#### Scenario: Banned не снимается автоматически
-- **WHEN** у агента есть `agent_restrictions(restriction_type=banned)`, и
-  проходит произвольное время
-- **THEN** строка остаётся, диспетчер продолжает останавливать прогоны, пока
-  человек не удалит строку вручную
+#### Scenario: Banned снимается успешной авто-заменой
+- **WHEN** sweep авто-замены успешно подменяет аккаунт агента и завершает его
+  активацию
+- **THEN** строка `agent_restrictions(restriction_type=banned)` снимается тем же
+  прогоном (commit point), и агент возвращается в рабочий контур
+
+#### Scenario: Banned без замены не снимается сам по себе
+- **WHEN** у агента есть `agent_restrictions(restriction_type=banned)`, замена не
+  выполнена (пул пуст либо замена не завершена), и проходит произвольное время
+- **THEN** строка остаётся, диспетчер продолжает останавливать прогоны, пока её не
+  снимет успешная авто-замена или человек вручную
 

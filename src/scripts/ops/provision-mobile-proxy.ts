@@ -22,13 +22,11 @@
 // (tg-account.json proxy.countryCode). Явный флаг всегда важнее сохранённого значения и
 // применяется ко всем агентам списка одинаково.
 
-import * as fs from "fs";
-
 import type { Logger } from "../../core/logger";
 import { TelegramService } from "../../core/telegram/service";
-import { accountConfigPath, loadAccountConfig, type ProxyConfig } from "../../core/config";
+import { loadAccountConfig, type ProxyConfig } from "../../core/config";
 import { fetchAvailableMobileProxies, createProxyPicker } from "../../features/proxy/proxy-pool";
-import type { MobileProxyCandidate } from "../../features/proxy/asocks-client";
+import { toProxyConfig, saveProxyToAccountConfig } from "../../features/proxy/provision-shared";
 import { ConnectTimeoutError } from "../../core/telegram/errors";
 
 const log: Logger = {
@@ -57,32 +55,6 @@ interface AgentResult {
     proxy?: { host: string; port: number };
     attempts: number;
     detail?: string;
-}
-
-function toProxyConfig(candidate: MobileProxyCandidate, countryCode: string): ProxyConfig {
-    return {
-        type: "socks5",
-        host: candidate.host,
-        port: candidate.port,
-        username: candidate.username,
-        password: candidate.password,
-        countryCode,
-    };
-}
-
-/** Перезаписывает только поле proxy в tg-account.json агента, остальные поля не трогает. */
-function saveProxyToAccountConfig(agentId: string, proxy: ProxyConfig): void {
-    const filePath = accountConfigPath(agentId);
-    const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    raw.proxy = {
-        type: proxy.type,
-        host: proxy.host,
-        port: proxy.port,
-        username: proxy.username,
-        password: proxy.password,
-        countryCode: proxy.countryCode,
-    };
-    fs.writeFileSync(filePath, JSON.stringify(raw, null, 2) + "\n", "utf8");
 }
 
 async function verifyCandidate(tg: TelegramService, proxy: ProxyConfig): Promise<void> {

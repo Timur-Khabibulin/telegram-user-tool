@@ -59,12 +59,16 @@ import {
     insertDmCandidate,
     recordChannelVisit,
     recordSendError,
+    markChannelStatus,
+    setWriteAccessReason,
+    clearWriteAccessReason,
     isFullSyncDue,
     markFullSyncDone,
     saveChatAccessHash,
     getChatAccessHash,
     getChatTitlesAndUsernames,
 } from "../core/db/channels";
+import { isPermanentReason, classifyParticipant, type SelfParticipantState } from "../core/write-access";
 import { saveReply } from "../core/db/replies";
 import { cacheChannelIdentities } from "../core/channel-sync";
 import { handlePostCommentSendError } from "../core/post-comment-send";
@@ -503,9 +507,63 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
         let dmAnalysis: { ответитьНа: { id: number; текст: string } | null; dmКандидаты: { id: number; score: number; reason?: string }[] } | null = null;
         const generalById = new Map(generalMessages.map((m) => [m.id, m]));
 
+        // 5.3c — Гейт права писать (channel-write-access, architecture §4.2). До
+        // фазы отправок определяем canWrite. Сбор DM (5.6/5.8) от него НЕ зависит —
+        // гейтятся только реальные отправки (R8: постоянная причина = read-only,
+        // канал продолжает читаться и копить DM-кандидатов).
+        const filteredGeneral = generalMessages.filter((m) => passesPrefilter(m.text));
+        const hasSendWork = newThreadMessages.length > 0 || threadReplies.length > 0 || filteredGeneral.length > 0;
+        let canWrite = true;
+        const existingWriteReason = channel.write_access_reason;
+        if (existingWriteReason && isPermanentReason(existingWriteReason)) {
+            // Постоянная причина уже в БД (снята при join или прошлой живой
+            // проверкой) — фазу отправок пропускаем, GetParticipant НЕ зовём (R15).
+            canWrite = false;
+        } else if (hasSendWork) {
+            // Один живой GetParticipant на канал за прогон — только если реально
+            // предстоит отправка (§6). peerCache засеян full-sync/seedPeerCache выше.
+            let state: SelfParticipantState | null = null;
+            try {
+                state = await withFloodRetry(() => tg.getSelfParticipant(chatId), log);
+            } catch (err: any) {
+                if (err instanceof FloodAbortError) {
+                    return { status: "error", details: { step: "get_self_participant", reason: "repeated_flood_wait", chatId } };
+                }
+                if (err instanceof ClientNotConnectedError) throw err;
+                // Непредвиденная ошибка живой проверки — канал не теряем: падаем на
+                // реактивный резерв (sendReply поймает отказ по коду ошибки).
+                log.warn(`[monitor-v5] get_self_participant failed for chatId=${chatId}, fallback to reactive: ${err?.message ?? err}`);
+            }
+            if (state) {
+                const verdict = classifyParticipant(state);
+                if (verdict) {
+                    canWrite = false;
+                    if (isPermanentReason(verdict.reason)) {
+                        // Постоянная причина, вскрытая живьём (комментарии закрыли
+                        // после вступления) — read-only, status НЕ трогаем (R8).
+                        setWriteAccessReason(agentId, chatId, verdict.reason, log, verdict.until);
+                    } else {
+                        // Переменная причина — причина + status='banned' (вход в
+                        // leave/rotate). Отправки не инициируем, канал завершаем (R9/R17).
+                        // Причина пробрасывается в событие бана журнала операций (§6).
+                        setWriteAccessReason(agentId, chatId, verdict.reason, log, verdict.until);
+                        markChannelStatus(agentId, chatId, "banned", log, undefined, undefined, undefined, verdict.reason);
+                        markChannelProcessed(agentId, chatId, log);
+                        channelsProcessed += 1;
+                        await sleepRandom(V5_DELAY_ACTIVE_MIN_SEC, V5_DELAY_ACTIVE_MAX_SEC);
+                        continue;
+                    }
+                } else if (existingWriteReason) {
+                    // can_write, но ранее стояла причина — снимаем признак (AC-11).
+                    clearWriteAccessReason(agentId, chatId, log);
+                }
+            }
+        }
+
         try {
-            // 5.4 — newThreadMessages (первый ответ пользователя) — без изменений от monitor.ts.
-            for (const entry of newThreadMessages) {
+            // 5.4 — newThreadMessages (первый ответ пользователя). При canWrite=false
+            // отправки не идут (channel-write-access, §4.2).
+            for (const entry of canWrite ? newThreadMessages : []) {
                 const rec = entry.agentReplyRecord;
                 const { threadId } = createGroupThread(
                     agentId,
@@ -541,8 +599,9 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
                 }
             }
 
-            // 5.5 — threadReplies (продолжение существующего треда) — без изменений от monitor.ts.
-            for (const entry of threadReplies) {
+            // 5.5 — threadReplies (продолжение существующего треда). При
+            // canWrite=false отправки пропускаются (channel-write-access, §4.2).
+            for (const entry of canWrite ? threadReplies : []) {
                 const historyLines = entry.threadMessages
                     .map((m) => (m.role === "agent" ? `- Ты: ${m.text}` : `- ${m.fromName ?? "Пользователь"}: ${m.text}`))
                     .join("\n");
@@ -575,11 +634,11 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
             }
 
             // 5.6 — generalMessages: один структурированный вызов на канал
-            // (отбор ≤1 сообщения для ответа + скоринг DM-кандидатов) — без
-            // изменений от monitor.ts.
-            const filtered = generalMessages.filter((m) => passesPrefilter(m.text));
-            if (filtered.length > 0) {
-                const analyzePrompt = analyzeChannelMessages(filtered.map((m) => `id=${m.id} ${m.fromName}: ${m.text}`).join("\n"));
+            // (отбор ≤1 сообщения для ответа + скоринг DM-кандидатов). Анализ идёт
+            // и при canWrite=false — сбор DM продолжается (R8), гейтится только
+            // отправка ответа ниже. filteredGeneral посчитан выше (5.3c).
+            if (filteredGeneral.length > 0) {
+                const analyzePrompt = analyzeChannelMessages(filteredGeneral.map((m) => `id=${m.id} ${m.fromName}: ${m.text}`).join("\n"));
                 dmAnalysis = await llm.completeObject(
                     { system: persona, prompt: analyzePrompt },
                     z.object({
@@ -588,7 +647,9 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
                     }),
                 );
 
-                if (dmAnalysis.ответитьНа) {
+                // При canWrite=false ответ не отправляется (channel-write-access);
+                // DM-скоринг ниже (5.8) сохраняется.
+                if (canWrite && dmAnalysis.ответитьНа) {
                     const sel = dmAnalysis.ответитьНа;
                     // Текст берём по id из реальных сообщений (general-reply-text-grounding) —
                     // sel.текст это восстановленный LLM текст, не обязательно совпадающий с оригиналом.

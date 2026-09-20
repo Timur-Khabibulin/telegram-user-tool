@@ -13,11 +13,14 @@ After=network.target
 [Service]
 Type=oneshot
 User=root
-WorkingDirectory=/root/.openclaw/extensions/telegram-user-tool
-ExecStart=/root/.openclaw/extensions/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/funnel-tracker.ts --admin agent1 --send-as agent27
+WorkingDirectory=/root/openclaw-plugins/telegram-user-tool
+ExecStart=/root/openclaw-plugins/telegram-user-tool/node_modules/.bin/tsx src/scripts/periodic/funnel-tracker.ts --admin agent1 --send-as agent27
 EnvironmentFile=-/root/.openclaw/codex-auth/.env
 EnvironmentFile=-/root/.openclaw/secrets.env
 Slice=tg-agents.slice
-TimeoutStartSec=1800
+# Пер-агентный disconnect с паузой 15-22с после каждого агента (см.
+# funnel-collect.ts disconnectAfterEachAgent) удлиняет прогон: ~85 активных
+# агентов × ~18с ≈ 26 мин пауз + сбор ≈ 34 мин. 2700с (45 мин) — запас над этим.
+TimeoutStartSec=2700
 StandardOutput=journal
 StandardError=journal
