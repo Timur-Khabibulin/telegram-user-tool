@@ -13,6 +13,7 @@ import Database from "better-sqlite3";
 
 import type { Logger } from "../../core/logger";
 import { workspaceDir } from "../../core/config";
+import { claimPoolAccountTo } from "../../core/pool-accounts";
 
 /** Фазовый маркер в workspace: свидетельствует, что swap закоммичен, активация ещё нет. */
 const PHASE_MARKER = "replacement.json";
@@ -54,29 +55,10 @@ function markerPath(agentId: string): string {
  * каталог уже забран/исчез (ENOENT) — вызывающий берёт следующий свободный.
  */
 export function claimPoolAccount(poolId: string, agentId: string, log: Logger): boolean {
-    const src = workspaceDir(poolId);
     const dst = incomingDir(agentId);
-    try {
-        fs.renameSync(src, dst);
-        log.info(`[banned-replacement] claim ${poolId} → ${path.basename(dst)}`);
-        return true;
-    } catch (err: any) {
-        if (err?.code === "ENOENT") return false;
-        throw err;
-    }
-}
-
-/** Переносит невалидный пул-аккаунт в карантин `workspace-emptyAccount<N>.invalid` (M2). */
-export function quarantinePoolAccount(poolId: string, log: Logger): void {
-    const src = workspaceDir(poolId);
-    const dst = `${src}.invalid`;
-    try {
-        fs.renameSync(src, dst);
-        log.warn(`[banned-replacement] пул-аккаунт ${poolId} невалиден → карантин ${path.basename(dst)}`);
-    } catch (err: any) {
-        if (err?.code === "ENOENT") return;
-        throw err;
-    }
+    const ok = claimPoolAccountTo(poolId, dst);
+    if (ok) log.info(`[banned-replacement] claim ${poolId} → ${path.basename(dst)}`);
+    return ok;
 }
 
 /**

@@ -29,8 +29,8 @@
 // батч, одно чтение + одна разметка прочитанным на весь непрочитанный хвост
 // чата, typing по скорости печати текста ответа. Стало:
 //   • полная синхронизация (listGroupChannels/syncChannels/
-//     cacheChannelIdentities) — не чаще раза в сутки (V5_FULL_SYNC_PERIOD_SECONDS),
-//     listGroupChannels постранично с паузами (core/telegram/service.ts);
+//     cacheChannelIdentities) — по устареванию access_hash (hasStaleAccessHashes),
+//     не по таймеру (monitor-v5-hash-driven-sync); postранично с паузами;
 //   • отбор каналов — волнами случайного размера (V5_WAVE_MIN/MAX) через
 //     повторные вызовы getChannelsBatch, пока не набран мягкий потолок
 //     V5_BATCH_LIMIT, с паузой после каждого вызова;
@@ -44,8 +44,9 @@
 import { z } from "zod";
 
 import type { SkillContext, SkillStatus } from "./types";
+import { LlmCallError } from "../llm/error-class";
 import { sleep, sleepRandom, randomBetween, FloodAbortError, withFloodRetry } from "./util";
-import { ClientNotConnectedError } from "../core/telegram/errors";
+import { ClientNotConnectedError, classifyTelegramErrorTag } from "../core/telegram/errors";
 import type { TgMessage } from "../core/telegram/service";
 import {
     initChannels,
@@ -60,20 +61,19 @@ import {
     recordChannelVisit,
     recordSendError,
     markChannelStatus,
-    setWriteAccessReason,
-    clearWriteAccessReason,
-    isFullSyncDue,
-    markFullSyncDone,
+    hasStaleAccessHashes,
     saveChatAccessHash,
-    getChatAccessHash,
+    getFreshChatAccessHash,
     getChatTitlesAndUsernames,
 } from "../core/db/channels";
-import { isPermanentReason, classifyParticipant, type SelfParticipantState } from "../core/write-access";
+import { classifyWriteAccess, levelOfDetected, type WriteAccessSnapshot } from "../core/write-access";
+import { recordWriteAccessEvent } from "../core/db/channel-operations";
 import { saveReply } from "../core/db/replies";
 import { cacheChannelIdentities } from "../core/channel-sync";
 import { handlePostCommentSendError } from "../core/post-comment-send";
 import { sendNotifyMessage } from "../core/review-bot-api";
 import {
+    FUNNEL_ADMIN_AGENT_ID,
     MONITOR_V5_CHECK_PERIOD_SECONDS,
     isReviewGateEnabled,
     V5_BATCH_LIMIT,
@@ -83,7 +83,6 @@ import {
     V5_DELAY_EMPTY_MIN_SEC,
     V5_DELAY_EMPTY_MAX_SEC,
     V5_GET_MESSAGES_LIMIT,
-    V5_FULL_SYNC_PERIOD_SECONDS,
     V5_WAVE_MIN,
     V5_WAVE_MAX,
     V5_WAVE_DELAY_MIN_SEC,
@@ -277,16 +276,18 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
     initChannels(agentId, log);
 
     // Шаг 3/3b — Полная синхронизация каналов (список диалогов + идентичность
-    // привязанных каналов) — не чаще раза в сутки, не каждый прогон
-    // (monitor-v5-human-pacing-batching design.md Decision 1). Due-порог —
-    // тот же periodSeconds-приём, что у getChannelsBatch.
-    if (isFullSyncDue(agentId, log, V5_FULL_SYNC_PERIOD_SECONDS)) {
+    // привязанных каналов). Триггерится ПО УСТАРЕВАНИЮ access_hash, не по суточному
+    // таймеру (monitor-v5-hash-driven-sync): проход нужен, когда есть member-канал
+    // с пустым/устаревшим относительно текущей авторизации хэшем. После reauth все
+    // хэши устаревают → один проход их переполучает и реконсилирует; между reauth
+    // ничего не устарело → проход не идёт. Он же обновляет chat_access_hash_updated_at
+    // (saveChatAccessHash) и реконсилирует not_found (syncChannels).
+    if (hasStaleAccessHashes(agentId, tg.getAccountConfig().sessionAuthorizedAt, log)) {
         const channelsMap = await tg.listGroupChannels();
         syncChannels(agentId, channelsMap, log);
         // Персист chatAccessHash, узнанного listGroupChannels в peerCache
-        // (design.md решение 5) — переживает рестарт процесса, в отличие от
-        // самого peerCache, и годится для сидирования кэша на следующих
-        // прогонах monitor-v5 (peerCache-окно между full sync — 24 ч).
+        // (design.md решение 5) — с провенансом (chat_access_hash_updated_at=now),
+        // чтобы дальше он проходил проверку свежести на холодных путях.
         for (const chatId of channelsMap.keys()) {
             const accessHash = tg.getCachedChatAccessHash(chatId);
             if (accessHash) saveChatAccessHash(agentId, chatId, accessHash, log);
@@ -297,9 +298,8 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
             if (err instanceof ClientNotConnectedError) throw err;
             log.warn(`[monitor-v5] шаг кэширования идентичности каналов пропущен: ${err?.message ?? err}`);
         }
-        markFullSyncDone(agentId, log);
     } else {
-        log.info(`[monitor-v5] полная синхронизация каналов пропущена — не due`);
+        log.info(`[monitor-v5] полный проход диалогов пропущен — устаревших access_hash нет`);
     }
 
     // Шаг 4.5 — Экспирировать устаревшие треды (один раз за прогон)
@@ -388,12 +388,13 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
         const chatId = channel.chatId;
 
         // 5.0 — Досеять peerCache персистентным chatAccessHash (design.md
-        // решение 5), если full sync сегодня не due и канал туда не попал:
-        // access_hash не истекает в рамках Telegram-сессии (core.telegram.org/
-        // api/peers), поэтому значение, записанное join-queue или прошлым full
-        // sync, остаётся рабочим и после рестарта процесса — не нужно ждать
-        // следующего full sync, чтобы getPeerDialog нашёл peer.
-        const cachedAccessHash = getChatAccessHash(agentId, chatId, log);
+        // решение 5), если full sync сегодня не due и канал туда не попал.
+        // tg-peer-identity-model: сидируем ТОЛЬКО если хэш действителен для
+        // текущей авторизации (получен не раньше sessionAuthorizedAt). Устаревший
+        // после переавторизации хэш НЕ сидируем — тогда getPeerDialog вернёт null,
+        // канал пропускается в этот прогон, а ближайший full sync досеет свежий
+        // хэш проходом диалогов (§6). Так закрывается баг R2/R3 и на этом пути.
+        const cachedAccessHash = getFreshChatAccessHash(agentId, chatId, tg.getAccountConfig().sessionAuthorizedAt, log);
         if (cachedAccessHash) tg.seedPeerCache(chatId, cachedAccessHash);
 
         // 5.1 — Открыть чат: статус именно этого диалога, отдельным запросом
@@ -407,6 +408,24 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
                 return { status: "error", details: { step: "get_peer_dialog", reason: "repeated_flood_wait", chatId } };
             }
             if (err instanceof ClientNotConnectedError) throw err;
+            // read-time not_found (monitor-v5-hash-driven-sync): CHANNEL_PRIVATE при
+            // засеянном свежем хэше = агент больше не участник → помечаем not_found
+            // сразу, не дожидаясь полного прохода. CHANNEL_INVALID/PEER_ID_INVALID сюда
+            // НЕ относятся — это протухший хэш (его инвалидирует/переполучает путь
+            // handlePostCommentSendError/провенанс), не потеря членства.
+            if (classifyTelegramErrorTag(err) === "channel_private") {
+                // channel-write-access-proactive (§12.2, R7): потеря доступа → авторотация.
+                log.info(`[monitor-v5] CHANNEL_PRIVATE chatId=${chatId} — доступ потерян, авторотация`);
+                markChannelStatus(agentId, chatId, "banned", log, undefined, undefined, "monitor", "channel_forbidden");
+                recordWriteAccessEvent(
+                    { adminAgentId: FUNNEL_ADMIN_AGENT_ID, chatId, agentId, source: "monitor", payload: { status: "channel_forbidden", level: "account", action: "autorotate" } },
+                    log,
+                );
+                recordChannelVisit(agentId, { chatId, outcome: "empty", messagesCount: 0 }, log);
+                channelsProcessed += 1;
+                await sleepRandom(V5_DELAY_EMPTY_MIN_SEC, V5_DELAY_EMPTY_MAX_SEC);
+                continue;
+            }
             log.warn(`[monitor-v5] get_peer_dialog failed for chatId=${chatId}: ${err?.message ?? err}`);
             dialogStatus = null;
         }
@@ -480,6 +499,21 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
                 return { status: "error", details: { step: "get_messages", reason: "repeated_flood_wait", chatId } };
             }
             if (err instanceof ClientNotConnectedError) throw err;
+            // read-time not_found (monitor-v5-hash-driven-sync): кик между getPeerDialog
+            // и чтением — редко, но CHANNEL_PRIVATE здесь = не участник → not_found.
+            if (classifyTelegramErrorTag(err) === "channel_private") {
+                // channel-write-access-proactive (§12.2, R7): потеря доступа → авторотация.
+                log.info(`[monitor-v5] CHANNEL_PRIVATE при чтении chatId=${chatId} — доступ потерян, авторотация`);
+                markChannelStatus(agentId, chatId, "banned", log, undefined, undefined, "monitor", "channel_forbidden");
+                recordWriteAccessEvent(
+                    { adminAgentId: FUNNEL_ADMIN_AGENT_ID, chatId, agentId, source: "monitor", payload: { status: "channel_forbidden", level: "account", action: "autorotate" } },
+                    log,
+                );
+                recordChannelVisit(agentId, { chatId, outcome: "empty", messagesCount: 0 }, log);
+                channelsProcessed += 1;
+                await sleepRandom(V5_DELAY_EMPTY_MIN_SEC, V5_DELAY_EMPTY_MAX_SEC);
+                continue;
+            }
             log.warn(`[monitor-v5] get_messages failed for chatId=${chatId}, skipping channel: ${err.message ?? err}`);
             recordChannelVisit(agentId, { chatId, outcome: "error", messagesCount: 0 }, log);
             recordSendError(agentId, { chatId, source: "monitor_v5", errorCode: "get_messages_error" }, log);
@@ -504,27 +538,22 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
         // 5.3 — Классифицировать сообщения
         const { generalMessages, newThreadMessages, threadReplies } = classifyMessages(agentId, chatId, messages, log);
 
-        let dmAnalysis: { ответитьНа: { id: number; текст: string } | null; dmКандидаты: { id: number; score: number; reason?: string }[] } | null = null;
+        let dmAnalysis: { ответитьНа: { id: number; текст: string } | null; dmКандидаты: { id: number; score: number; reason: string | null }[] } | null = null;
         const generalById = new Map(generalMessages.map((m) => [m.id, m]));
 
-        // 5.3c — Гейт права писать (channel-write-access, architecture §4.2). До
-        // фазы отправок определяем canWrite. Сбор DM (5.6/5.8) от него НЕ зависит —
-        // гейтятся только реальные отправки (R8: постоянная причина = read-only,
-        // канал продолжает читаться и копить DM-кандидатов).
+        // 5.3c — Проактивная проверка права писать (channel-write-access-proactive).
+        // Перед фазой отправок: один живой GetParticipant → снимок статусов →
+        // classifyWriteAccess → действие (авторотация/suspend). Чтение и сбор DM
+        // (5.6/5.8) от гейта НЕ зависят — гейтятся только реальные отправки.
         const filteredGeneral = generalMessages.filter((m) => passesPrefilter(m.text));
         const hasSendWork = newThreadMessages.length > 0 || threadReplies.length > 0 || filteredGeneral.length > 0;
         let canWrite = true;
-        const existingWriteReason = channel.write_access_reason;
-        if (existingWriteReason && isPermanentReason(existingWriteReason)) {
-            // Постоянная причина уже в БД (снята при join или прошлой живой
-            // проверкой) — фазу отправок пропускаем, GetParticipant НЕ зовём (R15).
-            canWrite = false;
-        } else if (hasSendWork) {
-            // Один живой GetParticipant на канал за прогон — только если реально
-            // предстоит отправка (§6). peerCache засеян full-sync/seedPeerCache выше.
-            let state: SelfParticipantState | null = null;
+        if (hasSendWork) {
+            // Один живой GetParticipant на канал за прогон — только если предстоит
+            // отправка (R15). peerCache засеян full-sync/seedPeerCache выше.
+            let snapshot: WriteAccessSnapshot | null = null;
             try {
-                state = await withFloodRetry(() => tg.getSelfParticipant(chatId), log);
+                snapshot = await withFloodRetry(() => tg.getSelfParticipant(chatId), log);
             } catch (err: any) {
                 if (err instanceof FloodAbortError) {
                     return { status: "error", details: { step: "get_self_participant", reason: "repeated_flood_wait", chatId } };
@@ -534,28 +563,50 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
                 // реактивный резерв (sendReply поймает отказ по коду ошибки).
                 log.warn(`[monitor-v5] get_self_participant failed for chatId=${chatId}, fallback to reactive: ${err?.message ?? err}`);
             }
-            if (state) {
-                const verdict = classifyParticipant(state);
-                if (verdict) {
+            if (snapshot) {
+                const action = classifyWriteAccess(snapshot);
+                if (action.kind !== "ok") {
                     canWrite = false;
-                    if (isPermanentReason(verdict.reason)) {
-                        // Постоянная причина, вскрытая живьём (комментарии закрыли
-                        // после вступления) — read-only, status НЕ трогаем (R8).
-                        setWriteAccessReason(agentId, chatId, verdict.reason, log, verdict.until);
+                    const detected = action.detected;
+                    const journalAction =
+                        action.kind === "suspend"
+                            ? action.durationSeconds == null ? "suspend" : "suspend_temporary"
+                            : action.kind === "join" ? "join"
+                            : action.kind === "join_request" ? "join_request"
+                            : "autorotate";
+                    // Журналируем обнаруженное препятствие (R3/R4).
+                    recordWriteAccessEvent(
+                        {
+                            adminAgentId: FUNNEL_ADMIN_AGENT_ID,
+                            chatId,
+                            agentId,
+                            source: "monitor",
+                            payload: {
+                                status: detected,
+                                level: levelOfDetected(detected),
+                                action: journalAction,
+                                kickedBy: action.details.kickedBy,
+                                date: action.details.date,
+                                bannedRights: action.details.bannedRights,
+                                restrictionReason: action.details.restrictionReason,
+                            },
+                        },
+                        log,
+                    );
+                    if (action.kind === "suspend") {
+                        // restricted/members_restricted → бессрочно; slowmode → временно
+                        // (авто-снятие expireChannelStatuses). Причина restricted — в description.
+                        const description = action.details.restrictionReason ? JSON.stringify(action.details.restrictionReason) : undefined;
+                        markChannelStatus(agentId, chatId, "suspend", log, action.durationSeconds ?? undefined, description, "monitor", detected);
                     } else {
-                        // Переменная причина — причина + status='banned' (вход в
-                        // leave/rotate). Отправки не инициируем, канал завершаем (R9/R17).
-                        // Причина пробрасывается в событие бана журнала операций (§6).
-                        setWriteAccessReason(agentId, chatId, verdict.reason, log, verdict.until);
-                        markChannelStatus(agentId, chatId, "banned", log, undefined, undefined, undefined, verdict.reason);
-                        markChannelProcessed(agentId, chatId, log);
-                        channelsProcessed += 1;
-                        await sleepRandom(V5_DELAY_ACTIVE_MIN_SEC, V5_DELAY_ACTIVE_MAX_SEC);
-                        continue;
+                        // autorotate / join / join_request → banned (вход в leave/rotate).
+                        // Проактивные join-пути без кэша флагов недостижимы (§12.5) — авторотация.
+                        markChannelStatus(agentId, chatId, "banned", log, undefined, undefined, "monitor", detected);
                     }
-                } else if (existingWriteReason) {
-                    // can_write, но ранее стояла причина — снимаем признак (AC-11).
-                    clearWriteAccessReason(agentId, chatId, log);
+                    markChannelProcessed(agentId, chatId, log);
+                    channelsProcessed += 1;
+                    await sleepRandom(V5_DELAY_ACTIVE_MIN_SEC, V5_DELAY_ACTIVE_MAX_SEC);
+                    continue;
                 }
             }
         }
@@ -643,7 +694,7 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
                     { system: persona, prompt: analyzePrompt },
                     z.object({
                         ответитьНа: z.object({ id: z.number(), текст: z.string() }).nullable(),
-                        dmКандидаты: z.array(z.object({ id: z.number(), score: z.number(), reason: z.string().optional() })),
+                        dmКандидаты: z.array(z.object({ id: z.number(), score: z.number(), reason: z.string().nullable() })),
                     }),
                 );
 
@@ -698,7 +749,7 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
             if (err instanceof PeerFloodError) {
                 return { status: "error", details: { step: "reply", reason: "peer_flood", chatId } };
             }
-            if (err instanceof ChannelSkipError) {
+            if (err instanceof ChannelSkipError || err instanceof LlmCallError) {
                 markChannelProcessed(agentId, chatId, log);
                 channelsProcessed += 1;
                 channelsSkippedErrors += 1;
@@ -727,7 +778,7 @@ export async function runMonitorV5(ctx: SkillContext): Promise<SkillStatus> {
                         msgId: m.id,
                         msgText: m.text,
                         score: cand.score,
-                        scoreReason: cand.reason,
+                        scoreReason: cand.reason ?? undefined,
                     },
                     log,
                 );

@@ -1,0 +1,62 @@
+@startuml rotation-flow
+title ensureClient — второй триггер ротации прокси (боевые провалы)
+
+start
+:вызов ensureClient (нормальный путь, контекст прогона);
+
+if (override?) then (да)
+  :боевой цикл без счётчика\n(candidate-verify / provisioning);
+  stop
+endif
+
+partition "probe-gate (R10, без изменений)" {
+  :probe текущего прокси;
+  if (probe ok?) then (нет)
+    :provisionProxyViaProbe(10, probe-verify);
+    if (замена найдена?) then (нет)
+      :throw ConnectTimeoutError\n(счётчик боевого НЕ трогаем);
+      stop
+    else (да)
+      :proxy = замена;
+    endif
+  endif
+}
+
+partition "боевой цикл (3x connect+getMe)" {
+  if (getMe успех?) then (да)
+    :resetProxyFailures(agentId)  (R5, однократно/процесс);
+    :return client;
+    stop
+  else (нет, все попытки исчерпаны)
+    :classifyAccountError;
+    if (banned / need_update_session?) then (да)
+      :restrictAgent + throw\n(счётчик НЕ трогаем, R4);
+      stop
+    endif
+    :n = incrementProxyFailures(agentId)  (R2/R3, однократно/процесс);
+    if (n >= threshold?) then (нет)
+      :throw ConnectTimeoutError;
+      stop
+    endif
+  endif
+}
+
+partition "ротация (R6/R7/R13/R14)" {
+  :reset счётчика в 0  (R5, до перебора);
+  :country = parseProxyCountry(...);
+  if (country?) then (нет)
+    :throw ConnectTimeoutError;
+    stop
+  endif
+  :provisionProxyViaProbe(5, liveVerify)\nliveVerify = verifyConnection({proxy});
+  if (кандидат прошёл боевое?) then (да)
+    :saveProxyToAccountConfig (в функции);
+    :финальный connect+getMe на новом прокси;
+    :кэшируем клиент, return  (прогон продолжается, R7);
+    stop
+  else (ни один из 5 / инвентарь пуст)
+    :throw ConnectTimeoutError\n(счётчик 0, R12);
+    stop
+  endif
+}
+@enduml

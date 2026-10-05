@@ -9,24 +9,24 @@
 import type { Logger } from "./logger";
 import type { OperationSource } from "./db/channel-operations";
 import { classifyTelegramErrorTag, parseFloodWait } from "./telegram/errors";
-import { classifySendError } from "./write-access";
 import {
     createGroupThread,
     savePostWatchComment,
     markChannelStatus,
-    setWriteAccessReason,
     recordSendError,
     countRecentlyBannedChannels,
+    invalidateChatAccessHash,
     type SendErrorSource,
 } from "./db/channels";
+import { recordWriteAccessEvent } from "./db/channel-operations";
 import { saveReply } from "./db/replies";
 import { upsertRestriction } from "./db/agent-restrictions";
 import { recordAccountError } from "./db/error-log";
 import { FUNNEL_ADMIN_AGENT_ID } from "./config";
 
-/** Окно и порог правила «10 каналов banned за сутки» (общее для monitor-v2/monitor-v3). */
+/** Окно и порог правила «30 каналов banned за сутки» (общее для monitor-v2/monitor-v3). */
 const RECENTLY_BANNED_WINDOW_SECONDS = 86400;
-const RECENTLY_BANNED_THRESHOLD = 10;
+const RECENTLY_BANNED_THRESHOLD = 30;
 
 /**
  * Пост-отправочная обвязка успешной отправки комментария к посту — заводит
@@ -85,14 +85,16 @@ export function handlePostCommentSendError(
     }
 
     if (tag === "chat_write_forbidden" || tag === "user_banned_in_channel") {
-        // channel-write-access (§4.3): переменная причина права записи —
-        // CHAT_WRITE_FORBIDDEN / account_kicked. Плюс status='banned' (вход в
-        // leave/rotate, R9) — прежнее поведение без изменений.
-        const reason = classifySendError(tag);
-        if (reason) setWriteAccessReason(agentId, chatId, reason, log);
-        recordSendError(agentId, { chatId, source, errorCode: "chat_write_forbidden" }, log);
-        // Причина пробрасывается в событие бана журнала операций (§6).
-        markChannelStatus(agentId, chatId, "banned", log, undefined, undefined, journalSource, reason ?? undefined);
+        // channel-write-access-proactive (§6, реактивный резерв): потеря права
+        // записи → авторотация (status='banned', вход в leave/rotate). Причина —
+        // фактический тег, пробрасывается и в событие бана status_change, и в
+        // отдельное событие write_access журнала.
+        recordSendError(agentId, { chatId, source, errorCode: tag }, log);
+        markChannelStatus(agentId, chatId, "banned", log, undefined, undefined, journalSource, tag);
+        recordWriteAccessEvent(
+            { adminAgentId: FUNNEL_ADMIN_AGENT_ID, chatId, agentId, source: journalSource, payload: { status: tag, level: "account", action: "autorotate" } },
+            log,
+        );
 
         const recentlyBanned = countRecentlyBannedChannels(agentId, RECENTLY_BANNED_WINDOW_SECONDS);
         if (recentlyBanned >= RECENTLY_BANNED_THRESHOLD) {
@@ -103,10 +105,14 @@ export function handlePostCommentSendError(
     }
 
     if (tag === "allow_payment_required") {
-        // channel-write-access (§2.3/§4.3): постоянная причина `paid` — канал
-        // остаётся read-only, `status` НЕ трогаем (прежний 'format_error' убран).
-        // Отправки дальше гейтит постоянная причина (precheck monitor-v5).
-        setWriteAccessReason(agentId, chatId, "paid", log);
+        // channel-write-access-proactive (§6): платные сообщения — препятствие
+        // уровня канала, авторотация не поможет → бессрочный suspend (канал не
+        // читаем). Прежний read-only/`format_error` убран.
+        markChannelStatus(agentId, chatId, "suspend", log, undefined, "paid", journalSource, "paid");
+        recordWriteAccessEvent(
+            { adminAgentId: FUNNEL_ADMIN_AGENT_ID, chatId, agentId, source: journalSource, payload: { status: "paid", level: "channel", action: "suspend" } },
+            log,
+        );
         return "format_error";
     }
 
@@ -121,6 +127,23 @@ export function handlePostCommentSendError(
     if (parseFloodWait(err) !== null) {
         recordSendError(agentId, { chatId, source, errorCode: "flood_deferred" }, log);
         return "flood_deferred";
+    }
+
+    if (tag === "channel_private") {
+        // Отправка в канал, где агент не участник (кик/выход) — помечаем not_found
+        // (monitor-v5-hash-driven-sync). Membership dual-write встроен в markChannelStatus.
+        markChannelStatus(agentId, chatId, "not_found", log, undefined, undefined, journalSource);
+        recordSendError(agentId, { chatId, source, errorCode: "channel_private" }, log);
+        return "other";
+    }
+
+    if (tag === "channel_invalid" || msg.includes("PEER_ID_INVALID")) {
+        // tg-peer-identity-model §3.3: обнуляем сохранённый access_hash — следующее
+        // обращение переполучит его. Ловит редкую серверную ротацию хэша в пределах
+        // той же авторизации (после reauth инвалидацию делает провенанс-таймстамп).
+        invalidateChatAccessHash(agentId, chatId, log);
+        recordSendError(agentId, { chatId, source, errorCode: "channel_invalid" }, log);
+        return "other";
     }
 
     recordSendError(agentId, { chatId, source, errorCode: "reply_failed" }, log);

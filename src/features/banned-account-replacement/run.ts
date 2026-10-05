@@ -12,12 +12,13 @@ import * as path from "path";
 
 import type { Logger } from "../../core/logger";
 import {
-    FUNNEL_ADMIN_AGENT_ID,
-    FUNNEL_PRIVATE_CHANNEL_ID,
     REPORT_AGENT_ID,
     listPoolAccountIds,
     loadAccountConfig,
+    accountConfigPath,
 } from "../../core/config";
+import { listPoolAccountsOldestFirst, quarantinePoolAccount, generateUsername } from "../../core/pool-accounts";
+import { applyPersonaToAccount } from "../persona-apply/apply-persona";
 import { listActiveByType, clearRestriction } from "../../core/db/agent-restrictions";
 import {
     listDueTransitions,
@@ -27,18 +28,15 @@ import {
 } from "../../core/db/lifecycle-transitions";
 import { listAgentAssignmentLinks } from "../../core/db/discovery";
 import { addJoinQueue } from "../../core/db/join-queue";
-import { upsertPrivateInviteLink } from "../../core/db/private-invites";
 import { createOrUpdateTask, removeTask } from "../../core/scheduler-control";
 import { TelegramService } from "../../core/telegram/service";
 import { classifyAccountError } from "../../core/telegram/errors";
-import { setupReplacementAccount } from "../../core/tdata";
 import { loadPersonaTemplate } from "../tg-agent-autoregistration/persona-template";
 import {
     buildIncoming,
     claimPoolAccount,
     clearMarker,
     commitSwap,
-    quarantinePoolAccount,
     readMarker,
     recoverAnchors,
 } from "./swap";
@@ -48,6 +46,14 @@ const DAY_SEC = 86400;
 /** Durable-флаг «пул пуст, оператор оповещён» (M6) — файл в ~/.openclaw/banned-replacement. */
 function alertFlagPath(): string {
     return path.join(os.homedir(), ".openclaw", "banned-replacement", "pool-empty-alerted");
+}
+
+/** Записывает сгенерированный username в tg-account.json агента (пул обезличен). */
+function persistUsername(agentId: string, username: string): void {
+    const p = accountConfigPath(agentId);
+    const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
+    raw.username = username;
+    fs.writeFileSync(p, JSON.stringify(raw, null, 2), "utf-8");
 }
 
 export interface BannedReplacementSummary {
@@ -188,28 +194,20 @@ async function replaceOne(agentId: string, adminAgentId: string, log: Logger): P
  */
 async function activateAndFinalize(agentId: string, adminAgentId: string, log: Logger): Promise<void> {
     const cfg = loadAccountConfig(agentId);
-    if (!cfg.username) throw new Error(`у агента ${agentId} нет username в tg-account.json — активация невозможна`);
-    const template = loadPersonaTemplate(cfg.persona, true);
 
-    // 1. Полная настройка под персону, кроме 2FA/сброса сессий (setupReplacementAccount).
-    const tg = new TelegramService(log);
-    try {
-        tg.loadAccount(agentId);
-        await tg.withActiveClient((client) => setupReplacementAccount(client, template, cfg.username!, log));
-    } finally {
-        await tg.disconnectAgent(agentId).catch(() => {});
+    // Пул-аккаунт обезличен (без username) — username персоны генерируется здесь и
+    // персистится в tg-account.json (идемпотентность: повтор активации переиспользует
+    // уже записанный, не генерирует другой поверх применённого к Telegram-аккаунту).
+    let username = cfg.username;
+    if (!username) {
+        const template = loadPersonaTemplate(cfg.persona, true);
+        username = generateUsername(template.profileData.nick);
+        persistUsername(agentId, username);
     }
 
-    // 2. Приватная инвайт-ссылка: создать от REPORT_AGENT_ID, сохранить (post_updated=0).
-    const invite = new TelegramService(log);
-    try {
-        invite.loadAccount(REPORT_AGENT_ID);
-        const { link } = await invite.exportChatInvite(FUNNEL_PRIVATE_CHANNEL_ID, { title: agentId });
-        upsertPrivateInviteLink(FUNNEL_ADMIN_AGENT_ID, agentId, link, Math.floor(Date.now() / 1000));
-        log.info(`[banned-replacement] ${agentId}: инвайт-ссылка создана и помечена на перепубликацию`);
-    } finally {
-        await invite.disconnectAgent(REPORT_AGENT_ID).catch(() => {});
-    }
+    // 1–2. Применить персону сессией агента + инвайт-ссылка (общий шаг с фазой 2).
+    // connectId == agentId: аккаунт уже в workspace-<agentId> после commitSwap.
+    await applyPersonaToAccount(agentId, agentId, cfg.persona, username, log);
 
     // 3. T0-конфигурация: warmup on; join-queue наполнена из реестра (старт отложен).
     await createOrUpdateTask({ agentId, type: "account-warmup" }, log);
@@ -241,10 +239,10 @@ async function activateAndFinalize(agentId: string, adminAgentId: string, log: L
  * ошибки (прокси/сеть) — пропуск без карантина (аккаунт останется в пуле на след. раз).
  */
 async function findValidPoolAccount(log: Logger): Promise<string | null> {
-    for (const poolId of listPoolAccountIds()) {
+    for (const poolId of listPoolAccountsOldestFirst()) {
         const tg = new TelegramService(log);
         try {
-            tg.loadAccount(poolId);
+            tg.loadAccount(poolId, { pool: true });
             await tg.withActiveClient((client) => client.getMe());
             log.info(`[banned-replacement] пул-аккаунт ${poolId} валиден — берём`);
             return poolId;
@@ -252,7 +250,7 @@ async function findValidPoolAccount(log: Logger): Promise<string | null> {
             const accountFailure = classifyAccountError(err);
             if (accountFailure) {
                 log.warn(`[banned-replacement] пул-аккаунт ${poolId} непригоден (${accountFailure}) — карантин`);
-                quarantinePoolAccount(poolId, log);
+                quarantinePoolAccount(poolId);
             } else {
                 log.warn(`[banned-replacement] пул-аккаунт ${poolId}: ошибка подключения (${err?.message ?? err}) — пропуск, остаётся в пуле`);
             }

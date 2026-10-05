@@ -1,370 +1,420 @@
 # Право писать в канал — архитектура
 
 Design-doc (КАК). Источник требований (ЧТО) — [requirements-v1.md](requirements-v1.md).
-Здесь фиксируется техническое решение по факту текущего кода. Развилки закрыты
-владельцем — принятые решения собраны в §8.
+Диаграмма домена (TL-схема) — [participant-rights-model.puml](participant-rights-model.puml).
+Здесь фиксируется техническое решение по факту текущего кода ветки `refactoring-2`.
 
-Статус: архитектура согласована, до кода. Согласуется с состоянием кода на ветке
-`refactoring-2`.
+Модель **проактивная**: препятствия определяются из статусов канала и участника
+**перед отправкой**, каждое пишется в журнал операций (ИО), по каждому выполняется
+однозначное действие. Прежняя редакция описывала реактивную модель с колонкой
+`write_access_reason` — она заменяется. Документ описывает целевое состояние и дельту
+от текущего кода. Все развилки согласованы с владельцем (см. §12).
 
 ---
 
 ## 1. Резюме решения
 
-Право писать моделируется **одной причиной** (`write_access_reason`), хранимой в
-`channels` **отдельно** от `status`, а не расширением enum `status`. Причина —
-источник истины признака «писать нельзя» (NULL = можно писать / ещё не проверялось).
-Тип причины (постоянная/переменная) не хранится — он выводится из значения причины
-чистой функцией (`isPermanentReason`).
+- **Признак «писать нельзя» больше не хранится отдельной колонкой.** Каждое
+  препятствие §3.5 требований отображается на существующий механизм жизненного цикла
+  (`status`), очередь вступления или журнал. Гейт отправок/чтения обеспечивается тем,
+  что действие уводит канал из выборки `getChannelsBatch` (`banned`/`suspend`).
+  Колонки `write_access_reason` / `write_access_until` из модели удаляются (§8).
+- **Классификация возвращает действие, а не причину.** Чистая функция
+  `classifyWriteAccess(snapshot) → WriteAccessAction` — единственный дом маппинга
+  (заменяет `classifyParticipant`/`isPermanentReason`/`classifyDefaultBannedRights`).
+- **Проактивная проверка — одна точка** в `monitor-v5`, перед фазой отправок (шаг
+  5.3c). Реактивная классификация ошибок отправки (`post-comment-send.ts`) остаётся
+  резервом (R16).
 
-Развод постоянных и переменных причин на выход/ротацию делается **без правки кода
-ротации**. Дискриминатор один: ставим ли мы `status='banned'`.
+Отображение «статус → действие → механизм»:
 
-- **Переменная** причина → `status='banned'` (существующий путь: `leave-banned-channels`
-  → `leaved_from_banned` → `channel-rotation`). Плюс пишем `write_access_reason` для
-  наблюдаемости.
-- **Постоянная** причина → `status` **не трогаем** (остаётся NULL). Канал продолжает
-  читаться монитором (сбор DM), но перед отправкой шаг записи пропускается по
-  `write_access_reason`. Ротация его не видит (нет `banned` → нет `leaved_from_banned`).
-
-Три точки съёма:
-
-| Точка | Величина | Где в коде | Вызов Telegram |
+| Статус | Уровень | Действие | Механизм |
 |---|---|---|---|
-| При вступлении | постоянная | `service.joinDiscussionGroups` → `join-queue.ts` → `upsertChannelIdentityFromJoin` | уже делается `GetFullChannel` — переиспользуем `default_banned_rights`/`linked_chat_id` |
-| Перед отправкой | переменная | `monitor-v5.ts`, до цикла отправок канала (шаг 5.3c) | новый живой `GetParticipant(self)` в группе обсуждения |
-| При отказе отправки | резерв | `core/post-comment-send.ts` `handlePostCommentSendError` (общий обработчик отправки, который зовёт `sendReply` v5) | по коду ошибки (`CHAT_WRITE_FORBIDDEN`, `ALLOW_PAYMENT_REQUIRED`, …) |
+| `channel.left`, `chat.left` | аккаунт | авторотация | `markChannelStatus('banned')` → leave-banned → `leaved_from_banned` → channel-rotation |
+| `chatForbidden`, `channelForbidden`, `CHANNEL_PRIVATE` при чтении | аккаунт | авторотация | то же (§7.1 — единая точка 5.1) |
+| `channelParticipantBanned` | аккаунт | авторотация | то же + payload `kicked_by`/`date`/`banned_rights` в ИО |
+| `channelParticipantLeft` / `USER_NOT_PARTICIPANT` | аккаунт | авторотация | то же |
+| `channel.restricted` | канал | suspend (∞) + не читать | `markChannelStatus('suspend')` без duration + `restriction_reason` в ИО |
+| `default_banned_rights.send_messages` (все замьючены) | канал | suspend (∞) | `markChannelStatus('suspend')` без duration |
+| `paid` (`ALLOW_PAYMENT_REQUIRED`, реактивно) | канал | suspend (∞) | как выше, из `post-comment-send` (§6) |
+| `channel.restriction_reason` | канал | запись события | ИО (`platform`/`reason`/`text`) |
+| `channel.slowmode_enabled` | канал | suspend временный | `markChannelStatus('suspend', slowmodeSeconds)` → `expireChannelStatuses` |
+| `channel.join_to_send` (не участник) | канал | вступление | `addJoinQueue` |
+| `channel.join_request` (не участник) | канал | заявка + авторотация | `JoinChannel` + `markChannelStatus('banned')` |
 
-Классификация сигнал → причина живёт в одном новом чистом модуле
-`src/core/write-access.ts`; сетевой вызов `GetParticipant` — в новом методе
-`TelegramService` (заменяет DEBUG-заглушку `debugCheckAdmin`).
+Все действия уже существуют в коде — способность их **комбинирует и журналирует**,
+не вводя новых механизмов исполнения.
 
 ---
 
-## 2. Модель данных
+## 2. Модель классификации
 
-### 2.1 Новые колонки `channels`
+Один чистый модуль (переработанный `src/core/write-access.ts`) — единственный дом
+маппинга. Без I/O, тестируется изолированно (`write-access.test.ts` переписывается
+под действия).
 
-`chatId` в `channels.db` — это id **группы обсуждения** (её кладёт `joinDiscussionGroups`
-как `discussionChat`), а не broadcast-канала. Поэтому и постоянная величина, и живой
-`GetParticipant` относятся к строке `channels` напрямую, без доп. резолва (R2 соблюдается
-самой моделью данных, без нового механизма).
-
-Минимально необходимый набор (обоснование каждого поля — почему без него требование не
-выполняется):
-
-| Колонка | Тип | Зачем (требование) | Почему нельзя без неё |
-|---|---|---|---|
-| `write_access_reason` | TEXT NULL | R6: единый признак + одна причина | Признак «писать нельзя» = `reason IS NOT NULL`. Отдельный boolean не заводим — он был бы производным от reason (простота). |
-| `write_access_until` | INTEGER NULL | R11: `until_date` хранить справочно | `until_date` персонального ограничения; только для справки, плановой переоценки по нему нет. |
-
-**`write_access_checked_at` — не добавляется** (решение владельца). Ни одно требование
-его не требует: переменная величина берётся живьём (R4), снятие фиксируется живой
-проверкой (AC-11). Модель данных ограничивается `write_access_reason` + `write_access_until`.
-
-Значения `write_access_reason` (перечень §3 требований):
+### 2.1 Вход: нормализованный снимок
 
 ```
-members_restricted   постоянная
-paid                 постоянная
-account_muted        переменная
-account_kicked       переменная
-not_participant      переменная   (удаление приравнивается к бану, R10)
-CHAT_WRITE_FORBIDDEN переменная   (по умолчанию, только реактивно)
+interface WriteAccessSnapshot {
+  discussion: {
+    left: boolean;
+    restricted: boolean;
+    restrictionReason?: RestrictionReason[];       // platform/reason/text
+    slowmodeEnabled: boolean;
+    joinToSend: boolean;
+    joinRequest: boolean;
+    defaultBannedSendMessages: boolean;            // все рядовые замьючены (R17)
+  };
+  broadcast?: { restricted: boolean; restrictionReason?: RestrictionReason[] };
+  participant:
+    | { kind: "participant"; ctor: "regular" | "self" | "admin" | "creator" | "banned";
+        left?: boolean; kickedBy?: number; date?: number;
+        bannedSendMessages?: boolean; untilDate?: number }
+    | { kind: "not_participant" }        // channelParticipantLeft / USER_NOT_PARTICIPANT
+    | { kind: "banned_in_channel" }      // USER_BANNED_IN_CHANNEL (ошибка вызова)
+    | { kind: "forbidden" };             // chatForbidden / channelForbidden / CHANNEL_PRIVATE
+  slowmodeDefaultSeconds?: number;       // фикс. дефолт temp-suspend (§12.8), без доп. вызова
+}
 ```
 
-`no_discussion` в этот перечень колонки **не попадает** — см. §5.2 (у такого канала нет
-строки `channels`).
+Инверсия флагов `ChatBannedRights` учитывается при разборе `banned_rights` и
+`default_banned_rights` (R15): `send_messages = true` = «запрещено»; `until_date`
+(`0`, < 30 сек, > 366 дней) = «навсегда» (`normalizeUntil`).
 
-Тип (постоянная/переменная) — не колонка, а чистая функция:
+### 2.2 Выход: действие
 
 ```
-isPermanentReason(reason) = reason ∈ { members_restricted, paid }
+type DetectedStatus =
+  | "channel_left" | "chat_forbidden" | "channel_forbidden"
+  | "participant_banned" | "participant_left"
+  | "restricted" | "members_restricted" | "paid"
+  | "slowmode" | "join_to_send" | "join_request";
+
+type WriteAccessAction =
+  | { kind: "ok" }
+  | { kind: "autorotate";   detected: DetectedStatus; journal: WriteAccessEventPayload }
+  | { kind: "suspend";      durationSeconds: number | null; detected; journal } // null = бессрочно
+  | { kind: "join";         detected; journal }
+  | { kind: "join_request"; detected; journal };   // заявка + авторотация
+
+function classifyWriteAccess(s: WriteAccessSnapshot): WriteAccessAction;
 ```
 
-### 2.2 Миграция
+### 2.3 Порядок разбора (приоритет при одновременных флагах)
 
-Новая `migrateWriteAccessColumns(db)` по образцу существующих аддитивных миграций
-(`migrateStatusColumns` и др.): `ALTER TABLE channels ADD COLUMN … ` для каждой новой
-колонки, вызывается из `initChannels`. Все колонки nullable, дефолт NULL.
+Сначала — что блокирует **всех** (уровень канала, авторотация не поможет), затем —
+что блокирует **наш аккаунт** (уровень аккаунта, авторотация может помочь):
 
-Бэкафилл не нужен: у существующих строк `write_access_reason = NULL` = «можно писать /
-не проверялось». Первая живая проверка/отказ отправки проставит причину, если она есть
-(самозаполнение). Строки, уже стоящие в `banned`/`leaved_from_banned`, идут прежним
-путём — эта фича их поведение не меняет.
+1. **`restricted`** (broadcast **или** discussion) → `suspend(∞)` (R10). Верхний
+   приоритет: канал ограничен Telegram для всех.
+2. **`defaultBannedSendMessages`** (все рядовые замьючены) → `suspend(∞)` (R17).
+   Тоже уровень канала — смена аккаунта не поможет.
+3. **Доступ потерян** (`participant.kind = "forbidden"`; `discussion.left`) →
+   `autorotate` (R6, R7).
+4. **`participant_banned`** (`kind="banned_in_channel"`; либо `ctor="banned"` с
+   `left=true`; либо `bannedSendMessages=true`) → `autorotate`, payload
+   `kicked_by`/`date`/`banned_rights` (R8, R4).
+   *Нюанс:* `ctor="banned"` без запрета текста (ограничены только медиа) при
+   бинарной гранулярности «хотя бы текст» — писать можно; падаем ниже.
+5. **Не участник** (`kind="not_participant"` / `channelParticipantLeft`):
+   - `discussion.joinRequest` → `join_request` (заявка + авторотация, R14);
+   - иначе `discussion.joinToSend` → `join` (вступление, R13);
+   - иначе → `autorotate` (R9).
+6. **`slowmode_enabled`** (участник, всё выше — нет) → `suspend(slowmodeDefaultSeconds)`
+   временный (R12).
+7. иначе → `ok`.
 
-### 2.3 Согласование со `status` — что не дублируется и что репойнтится
-
-- `status` остаётся жизненным циклом канала (`banned`/`suspend`/`leaved_*`/`not_found`/
-  …). Смысл права записи в него не переносится — R6 требует раздельность.
-- **`allow_payment_required` репойнтится.** Сейчас общий обработчик
-  `handlePostCommentSendError` ставит на него `status='format_error'`. По §3 требований
-  это причина `paid` (постоянная, read-only). Новое поведение: ставим
-  `write_access_reason='paid'`, `status` **не трогаем** (канал остаётся читаемым, отправки
-  гейтит постоянная причина). Ветка `format_error` для `allow_payment_required` выделена и
-  убрана из общего обработчика (см. §4.3).
-- **`chat_send_plain_forbidden` / `chat_send_media_forbidden` — вне скоупа.** В §3
-  требований их нет (перечень причин закрыт). Текущее поведение (`format_error`,
-  без выхода) не трогаем. `chat_send_plain_forbidden` (нельзя даже текст) при бинарной
-  гранулярности R5 формально ближе к «писать нельзя», но требования его не включили.
-  Решение владельца: **оставить как есть** (`format_error`), новую причину не заводить.
+`join_to_send`/`join_request` действуют только в ветке «не участник»: у состоящего
+аккаунта ценз вступления на право писать не влияет (§12.3 — подтверждено владельцем).
+`paid` в проактивный разбор не входит (виден только реактивно, §6).
 
 ---
 
-## 3. Классификация причины
+## 3. Точка проактивной проверки в monitor-v5
 
-Один новый чистый модуль `src/core/write-access.ts` — единственный дом классификации
-(«один факт — один дом»). Без I/O, тестируется изолированно. Экспортирует:
+Одна точка — **шаг 5.3c**, после классификации сообщений (5.3) и до фазы отправок
+(5.4–5.6). Уже существует (сейчас зовёт `getSelfParticipant` + `classifyParticipant`);
+переводится на снимок + `classifyWriteAccess`.
 
-```
-type WriteAccessReason =
-  | "members_restricted" | "no_discussion" | "paid"
-  | "account_muted" | "account_kicked" | "not_participant" | "CHAT_WRITE_FORBIDDEN";
+Проверка выполняется, только если по каналу есть работа на отправку (`hasSendWork`):
+нет отправок — нет служебного вызова (R15). Чтение и сбор DM-кандидатов от гейта не
+зависят и идут всегда.
 
-isPermanentReason(r): boolean
+### 3.1 Какие вызовы и минимизация трафика (R2, R15)
 
-// Реактивный путь: код ошибки отправки → причина | null.
-// null = сигнал НЕ про право записи (slowmode/peer_flood/flood/прочее) — не помечаем.
-classifySendError(tag: TelegramErrorTag): WriteAccessReason | null
-
-// Проактивный путь: нормализованный исход GetParticipant → причина | null.
-// null = can_write.
-classifyParticipant(state: SelfParticipantState): WriteAccessReason | null
-```
-
-Маппинг §3 требований реализуется так:
-
-| Сигнал | Источник | → причина |
+| Что | Источник | Живость |
 |---|---|---|
-| `default_banned_rights.send_messages = true` у группы обсуждения | join, `GetFullChannel` | `members_restricted` |
-| нет `linked_chat_id` | join, `GetFullChannel` | `no_discussion` (см. §5.2) |
-| `channelParticipantBanned`, `send_messages=true`, `left=false` | precheck, `GetParticipant` | `account_muted` (+`until_date`) |
-| `channelParticipantBanned`, `left=true` **или** `USER_BANNED_IN_CHANNEL` | precheck/send | `account_kicked` |
-| `USER_NOT_PARTICIPANT` / `channelParticipantLeft` | precheck/send | `not_participant` |
-| голый `CHAT_WRITE_FORBIDDEN` | send | `CHAT_WRITE_FORBIDDEN` |
-| `ALLOW_PAYMENT_REQUIRED` | send | `paid` |
-| `SLOWMODE_WAIT_N` | send | `null` (R12 — временное, не помечаем) |
-| `PEER_FLOOD` | send | `null` (R13 — уровень аккаунта) |
-| участник обычный/self/admin/creator И права разрешают | precheck | `null` (can_write) |
+| Статус участника; флаги группы (`left`, `restricted`, `slowmode`, `join_to_send`, `join_request`, `default_banned_rights`) | `GetParticipant(self)` в группе — участник + `chats[группа]` в том же ответе | **живьём** каждый прогон, 1 вызов |
+| Access-флаги **broadcast** (`restricted`, `restriction_reason`) | `GetFullChannel(broadcast)` при join | **кэш при join** |
 
-Теги ошибок берутся из существующего `classifyTelegramErrorTag` (`errors.ts`), который
-уже возвращает `chat_write_forbidden` / `user_banned_in_channel` / `allow_payment_required`
-/ `peer_flood`. `SLOWMODE_WAIT` уже прозрачно ретраится `retryOnFloodWait` и до реактивной
-ветки в норме не долетает.
+Живой на прогон — только `GetParticipant` в группе обсуждения. Его ответ несёт и
+объект `channel` группы (флаги освежаются бесплатно), и статус участника. Постоянные
+флаги broadcast снимаются разово при join и обновляются на полном проходе диалогов
+(`monitor-v5-hash-driven-sync`). Число живых вызовов ограничено сверху числом
+**реально пишущихся** каналов за прогон (§9). `USER_NOT_PARTICIPANT`/
+`USER_BANNED_IN_CHANNEL` приходят ошибкой вызова (нормализуются в `kind`).
 
-### 3.1 Новый метод `TelegramService`
+### 3.2 Ветка «не участник»
 
-`GetParticipant(InputPeerSelf)` для группы обсуждения. Заменяет DEBUG-заглушку
-`debugCheckAdmin`. Возвращает **дискриминированный** результат (важно: `USER_NOT_PARTICIPANT`
-приходит ошибкой, а не объектом участника — §3 требований, термин «Не участник»):
+Если `GetParticipant` вернул `not_participant`, флаги `join_to_send`/`join_request`
+берутся из **кэша при join** (строка `channels` существует — join когда-то был). При
+отсутствии кэша — дефолт `autorotate` (§12.5, подтверждено), без доп. `GetFullChannel`.
+
+### 3.3 Действие внутри прогона
+
+После `classifyWriteAccess`: `ok` → отправки идут; любое препятствие → фаза отправок
+пропускается, действие применяется (`status`/join-очередь) + `recordWriteAccessEvent`,
+`continue` к следующему каналу (R17 — одна попытка на канал за прогон, обеспечено
+существующим потоком monitor-v5).
+
+---
+
+## 4. Действия → существующие механизмы
+
+### 4.1 Авторотация → status='banned' → channel-rotation
 
 ```
-type SelfParticipantState =
-  | { kind: "participant"; participant: Api.TypeChannelParticipant; defaultBannedSendMessages: boolean }
-  | { kind: "not_participant" }
-  | { kind: "banned_in_channel" };   // USER_BANNED_IN_CHANNEL как ошибка вызова
+markChannelStatus(agentId, chatId, 'banned', …)      # precheck / post-comment-send
+  → getLeaveQueue (status IN 'banned','should_leave') # leave-banned-channels
+  → выход + setLeftChannelStatus('leaved_from_banned')
+  → channel-rotation (суточный): 'leaved_from_banned' → другому аккаунту
 ```
 
-`chatId` + `chatAccessHash` (обе уже в строке `channels`, `chatAccessHash` кладётся при
-join) дают `InputChannel` группы без доп. резолва; в `monitor-v5` peerCache к этому моменту
-уже засеян (full-sync `listGroupChannels`/`seedPeerCache` по строке 5.0). Живой характер
-(R4): значение не персистится и берётся запросом в текущем прогоне.
+`getChannelsBatch` исключает `banned`/`leaved_from_banned` — гейт наступает
+автоматически. Правки в `leave-banned-channels`/`channel-rotation` не требуются.
+
+### 4.2 Suspend → ChannelStatus + таймер
+
+`markChannelStatus(…, 'suspend', log, durationSeconds, description)`:
+
+- **`restricted` / `default_banned_rights` / `paid`** → `durationSeconds = undefined`
+  (бессрочно); для `restricted` `description` = сериализованный `restriction_reason`.
+  `suspend` исключён из `getChannelsBatch` → «канал не читаем» (R10) достигается тем
+  же исключением, без отдельного флага.
+- **`slowmode`** → `durationSeconds = slowmodeDefaultSeconds` (фикс. дефолт, §12.8).
+  `expireChannelStatuses` (таймерное снятие, существует) снимает статус по истечении;
+  снятие журналируется `recordStatusChange` (`source='timer'`).
+
+### 4.3 Вступление → join-очередь
+
+`join_to_send` при неучастии → `addJoinQueue(agentId, [link], log)`. Ссылка — из
+`channelUsername`/`chatUsername`. `runJoinQueue` подхватит; при успехе
+`upsertChannelIdentityFromJoin` самолечит строку (`status=NULL`, membership='member').
+Авторотация/suspend при `join_to_send` не применяются (AC-7).
+
+### 4.4 Заявка → JoinChannel + авторотация
+
+`join_request` при неучастии → прямой `JoinChannel` на группу обсуждения (§12.6)
+инициирует заявку (Telegram → `INVITE_REQUEST_SENT`, тег `invite_request_sent`).
+Сразу после — `markChannelStatus('banned')` (авторотация, не дожидаясь одобрения,
+R14). Одобрят позже — канал уже уйдёт; повторное членство самолечится при join.
+
+### 4.5 Журнал (ИО) — общий для всех действий
+
+Каждое препятствие §3.5 пишется в `channel-operations` (§5).
 
 ---
 
-## 4. Точки съёма — детали
+## 5. Журнал операций (ИО)
 
-### 4.1 Постоянная величина при вступлении
+`channel-operations.ts` — append-only журнал (одна БД в workspace админ-агента,
+ключ `chatId`). Записи best-effort (сбой журнала не роняет обработку).
 
-`joinDiscussionGroups` (`service.ts`) уже держит в области видимости `fullChannel` и
-`discussionChat: Api.Channel`. `discussionChat.defaultBannedRights?.sendMessages` — та
-самая постоянная величина, **без единого дополнительного вызова** (переиспользуем, не
-изобретаем).
+### 5.1 Новый тип события `write_access`
 
-Проброс: добавить в `JoinedChannelIdentity` поле
-`defaultBannedSendMessages: boolean` → `join-queue.ts` передаёт его в
-`upsertChannelIdentityFromJoin` → тот при `true` пишет
-`write_access_reason='members_restricted'`.
+R3/R4 требуют журналировать **каждый** статус §3.5 с полями, в т.ч. `join_to_send`
+(не меняет `status`). Существующий `status_change` покрывает лишь переходы `status` и
+несёт только `reason: string` — недостаточно. Вводится один новый тип:
 
-Согласование с self-heal `upsertChannelIdentityFromJoin`: сейчас он на повторном join
-сбрасывает `status` и связанное в NULL (успешное вступление = подтверждённое членство).
-Аналогично он должен **перезаписывать** `write_access_reason`: успешный join заново
-снимает постоянную величину, залипшая старая причина неактуальна. То есть при join
-пишем актуальное значение (`members_restricted` или NULL), а не «только если нашли запрет».
+```
+OperationType += "write_access"
 
-### 4.2 Переменная величина перед отправкой (`monitor-v5`, шаг 5.3c)
+interface WriteAccessEventPayload {
+  status: DetectedStatus;
+  level: "channel" | "account";
+  action: "autorotate" | "suspend" | "suspend_temporary" | "join" | "join_request";
+  kickedBy?: string;                     // participant_banned (R4)
+  date?: number;                         // participant_banned (R4)
+  bannedRights?: { sendMessages: boolean; untilDate: number | null };  // R4, R15
+  restrictionReason?: { platform: string; reason: string; text: string }[];  // R4
+}
 
-Порядок в обработке канала, после классификации (5.3) и до фазы отправок (шаги 5.4–5.6):
+function recordWriteAccessEvent(params: {
+  adminAgentId; chatId; agentId; persona?; source: OperationSource;
+  payload: WriteAccessEventPayload;
+}, log?): void;
+```
 
-1. Если у канала **постоянная** `write_access_reason` (`isPermanentReason`) → фазу
-   отправок пропускаем целиком, `GetParticipant` **не зовём** (экономия вызова, R15).
-   Чтение/классификация/сбор DM выполняются как обычно (R8: read-only). Канал помечается
-   обработанным.
-2. Иначе — один живой `GetParticipant(self)` на канал за прогон (см. §6):
-   - `classifyParticipant` → **переменная** причина: пишем `write_access_reason`,
-     `write_access_until` (для `account_muted`), ставим
-     `status='banned'` (вход в leave/rotate), отправки по каналу не делаем, канал
-     пропускаем.
-   - → `null` (can_write): если раньше стояла причина — **снимаем** (`write_access_reason
-     = NULL`, AC-11: снятие персонального ограничения живой проверкой). Отправляем.
-
-Живой `GetParticipant` покрывает `account_muted`/`account_kicked`/`not_participant`
-проактивно (до траты попытки отправки). Скрытые цензы (только-подписчики, стаж, антиспам-
-бот) он не видит — они остаются на реактивном резерве (§4.3), это ограничение среды (§4
-требований), не дефект.
-
-**Один прогон — одна попытка на канал (R17).** Как только по каналу в текущем прогоне
-зафиксировано «писать нельзя», остальные отправки в этот канал в этом прогоне не
-инициируются:
-
-- *Проактивно (precheck).* Шаг 2 выше при переменной причине пропускает фазу отправок
-  канала целиком (`continue` к следующему каналу) — до цикла отправок дело не доходит.
-- *Реактивно (первая ошибка отправки).* **Поведение уже обеспечено** существующим
-  `ChannelSkipError` в `monitor-v5`: первая не-flood ошибка отправки в обёртке `sendReply`
-  (через `handlePostCommentSendError`) бросает `ChannelSkipError`, внешний catch помечает
-  канал обработанным и делает `continue` — циклы 5.4/5.5/5.6 по этому каналу прерываются,
-  оставшиеся отправки не выполняются.
-
-Отдельного нового механизма под R17 не требуется — обе половины (проактивная и реактивная)
-покрыты существующим потоком управления `monitor-v5`.
-
-### 4.3 Реактивный резерв при отказе отправки (`core/post-comment-send.ts`)
-
-У `monitor-v5` нет инлайн-классификации ошибок отправки (в отличие от `monitor-v2`): его
-обёртка `sendReply` делегирует разбор в общий `handlePostCommentSendError`
-(`core/post-comment-send.ts`), который зовут также `monitor-v3`/`monitor-v4`/
-`review-listener`. Реактивная запись причины живёт там — это единственный дом
-классификации ошибки отправки для v5, рядом с уже существующей простановкой
-`status='banned'`/`format_error` («один факт — один дом»). Следствие: запись причины и
-репойнт `paid` действуют одинаково для всех пост-комментных отправителей, а не только v5
-(поведение согласованное, не регресс — precheck-гейт есть только у v5, для остальных запись
-причины инертна: её потребитель — `getChannelsBatch`/precheck v5).
-
-Ветка `chat_write_forbidden`/`user_banned_in_channel` дополняется записью
-`write_access_reason` через `classifySendError` (`CHAT_WRITE_FORBIDDEN` → `CHAT_WRITE_FORBIDDEN`,
-`user_banned_in_channel` → `account_kicked`). Простановка
-`status='banned'` и вход в leave/rotate — как сейчас (обе причины переменные, R9). Побочные
-эффекты (`send_errors`, суспенд-триггеры) не меняются.
-
-Ветка `allow_payment_required`: вместо `format_error` пишем `write_access_reason='paid'`,
-`status` не трогаем (§2.3). Отправки по каналу дальше гейтит постоянная причина (§4.2 шаг 1).
-
-`slowmode`/`peer_flood`/прочие: `classifySendError` вернёт `null` → `write_access_reason`
-**не пишем** (R12/R13). Поведение этих веток (ретрай slowmode, суспенд+abort на peer_flood)
-не меняется.
-
-### 4.4 Согласованность (R16, AC-11)
-
-- Снятие причины — **только в проверке перед прогоном отправок** (precheck, §4.2 шаг 2):
-  живой can_write снимает ранее стоявшую причину (`write_access_reason=NULL`). Дубля после
-  успешной отправки нет — precheck выполняется один раз на канал за прогон (согласуется с
-  «раз на прогон», §6) и предшествует любой отправке по каналу, поэтому отдельная
-  простановка после отправки избыточна (решение владельца).
-- Расхождение не копится: каждая причина ставится/снимается по свежему сигналу того же
-  прогона.
+Событие пишется **на месте обнаружения** (precheck / реактивный резерв) — единообразно
+для всех статусов. `status_change` (banned/suspend/suspend_lift) продолжает писаться
+существующим `recordStatusChange` из `markChannelStatus` — отдельный факт («один факт —
+один дом»): `write_access` = «обнаружено препятствие с деталями», `status_change` =
+«статус изменился». Аналитику банов/ротации (`aggregateBansByAgent` и т.п.) не трогаем.
 
 ---
 
-## 5. Интеграция с ротацией и read-only
+## 6. Реактивный резерв (post-comment-send)
 
-### 5.1 Ротация не меняется
+`handlePostCommentSendError` (`post-comment-send.ts`) остаётся резервом (R16) для
+препятствий, невидимых проактивно. Переработка веток (с записи `write_access_reason`
+на действие + `write_access` событие):
 
-`channel-rotation` (`run.ts`/`plan.ts`) читает `leaved_from_banned` и ничего не знает про
-право записи. Гейт R8/R9/R10 обеспечивается **выше** — тем, ставим ли мы `status='banned'`:
+- **`chat_write_forbidden` / `user_banned_in_channel`** → `autorotate`:
+  `markChannelStatus('banned')` (как сейчас) + `recordWriteAccessEvent`
+  (`status=participant_banned`/`channel_forbidden`). Побочные эффекты (`send_errors`,
+  триггер «10 банов за сутки») не меняются.
+- **`allow_payment_required` (`paid`)** → **`suspend(∞)`** + `write_access` событие
+  (`status=paid`, `level=channel`, §12.1 — подтверждено владельцем). Прежний
+  `format_error` для `paid` убирается.
+- **`chat_send_plain_forbidden` / `chat_send_media_forbidden`** — вне §3.5, поведение
+  как сейчас (`format_error`).
+- **`slowmode` / `peer_flood` / прочее** — как сейчас (ретрай slowmode, suspend+abort
+  на peer_flood).
 
-- переменная причина → `status='banned'` → `leave-banned-channels` → `leaved_from_banned`
-  → ротация (R9/AC-9);
-- постоянная причина → `status` не трогаем → канал никогда не станет `leaved_from_banned`
-  → ротация его не видит (R8/AC-10).
-
-`not_participant` — переменная (R10): классифицируется в переменную ветку, идёт в
-`banned`→rotate, а не в read-only. Отдельного кода для R10 не нужно — это следствие
-`isPermanentReason('not_participant') = false`.
-
-Правки в `leave-banned-channels`, `getLeaveQueue`, `plan.ts`, `run.ts` — **не требуются**.
-
-### 5.2 Read-only для постоянных причин
-
-«Оставляем read-only, не выходим» реализуется тем, что постоянная причина `status` не
-меняет: канал остаётся в выборке `getChannelsBatch` (`status IS NULL`), монитор его
-читает, копит DM. Единственная добавка — гейт фазы отправок по `isPermanentReason` (§4.2
-шаг 1). Выхода нет (не входит в leave-очередь), ротации нет (не `leaved_from_banned`).
-
-**`no_discussion` — строку `channels` не заводим** (решение владельца, вариант A). У
-broadcast-канала без группы обсуждения нет строки `channels`: `joinDiscussionGroups`
-возвращает такой канал как `skipped` (`"no linked discussion group"`), `join-queue.ts`
-ставит строке очереди `status='error'`, `upsertChannelIdentityFromJoin` не зовётся. «Канал
-остаётся read-only» для него физически не к чему привязать — членом группы обсуждения агент
-не стал, читать комментарии/собирать DM негде.
-
-Признак `no_discussion` живёт на строке `join_queue` (`status='error'`, reason) — как уже
-сейчас. Требуемый эффект «не ротировать / не тратить слот» достигается тем, что канал
-вообще не вступлён: ротировать нечего, `write_access_reason` для него не пишется, вступление
-в сам broadcast не выполняется. **AC-2 трактуется как «зафиксировано на уровне очереди
-вступления»** (не строкой `channels`).
+Дублирование проактива и резерва — только для случаев, которые проактив не успел
+увидеть (изменение флагов между прогонами). By design, не регресс.
 
 ---
 
-## 6. Стоимость и флуд
+## 7. Согласованность с идущими changes
 
-Живой `GetParticipant` перед отправкой — дополнительный служебный вызов. Требование R15:
-не повышать заметно риск антиспам-ограничений.
+### 7.1 tg-peer-identity-model (membership / peer_type / dual-write)
 
-Что уже снижает нагрузку в предложенной схеме:
+- Все действия идут через `markChannelStatus`, где **dual-write membership** встроен
+  (`banned`→`membership='banned'`; `suspend` членство не трогает). Второго писателя
+  membership способность не создаёт — конфликта нет.
+- **`chatForbidden`/`channelForbidden`/`CHANNEL_PRIVATE` при чтении → авторотация**
+  (`banned`), а не `not_found` (§12.2 — подтверждено владельцем, R7). Меняется ветка
+  monitor-v5 5.1 (единая точка): `CHANNEL_PRIVATE` со свежим хэшем → `markChannelStatus('banned')`.
+  Это отличается от `monitor-v5-hash-driven-sync` (там `not_found`) — согласовать при
+  реализации: право записи имеет приоритет, ветка объединяется.
+- `join_to_send` → join-очередь → `upsertChannelIdentityFromJoin` ставит
+  `membership='member'`. Согласовано.
 
-- Постоянная величина снимается **разово при join** (R3), периодически не перечитывается —
-  нулевая доп. стоимость в мониторе.
-- Каналы с постоянной причиной `GetParticipant` **не вызывают вообще** (§4.2 шаг 1) —
-  структурно закрытые каналы (≈24% ротируемых, §1 требований) служебных вызовов не несут.
-- `GetParticipant` зовётся только для каналов, где реально предстоит отправка (есть
-  свежая активность, прошедшая гейт свежести).
+### 7.2 monitor-v5-hash-driven-sync
 
-**Частота живого вызова — один `GetParticipant` на канал за прогон монитора** (решение
-владельца), не перед каждым сообщением. Вызов делается один раз в начале фазы отправок
-канала (§4.2 шаг 2): живой (не из персиста, R4), но не размножается на каждое сообщение
-(новые треды + продолжения + general — до 3+ отправок на канал дали бы столько же вызовов).
-«Перед каждой отправкой» (R4) трактуется как «перед фазой отправок канала в текущем
-прогоне» — в рамках одного прогона (секунды) переменная стабильна. Персистентного кэша
-переменной величины нет. Это согласуется с R17 (§4.2): при зафиксированном «писать нельзя»
-фаза отправок и так прерывается, повторный вызов не понадобится.
-
-Порядок «сначала постоянная (из БД, бесплатно) → потом живой вызов только если постоянная
-разрешает» гарантирует, что число `GetParticipant` ограничено сверху числом реально
-пишущихся каналов за прогон, а не общим числом каналов.
+- Полный проход диалогов (кэш broadcast-флагов) триггерится по устареванию access_hash;
+  проактивная проверка **читает** кэш, не форсирует проход, не конфликтует.
+- Ветка `CHANNEL_PRIVATE` (5.1) — единая точка изменения по §7.1.
 
 ---
 
-## 7. Трассировка требований → решение
+## 8. Модель данных — дельта
 
-| Требование | Где реализуется |
+- **Из использования удаляются** `channels.write_access_reason`/`write_access_until`
+  и функции `setWriteAccessReason`/`clearWriteAccessReason` с их вызовами. «Писать
+  нельзя» выражается через `status` + журнал. Колонки **оставляются мёртвыми** до
+  отдельной чистки (§12.4 — обратимость; дроп необратим).
+- **Переиспользуется без изменения схемы:** `status` (`banned`/`suspend`),
+  `statusDurationSeconds` (temp-suspend), `status_description` (`restriction_reason`),
+  `channel-operations.operations.attrs` (JSON payload).
+- **Новое:** `OperationType = "write_access"` + `recordWriteAccessEvent`. Схема
+  `operations` не меняется (расширяется JSON `attrs`).
+
+Миграций схемы `channels` способность не добавляет; бэкафилл не нужен (первое
+обнаружение самозаполняет действие/журнал).
+
+---
+
+## 9. Стоимость и флуд (R15)
+
+- Живой вызов на прогон — один `GetParticipant` на канал, **только при** `hasSendWork`.
+- Broadcast-флаги — из кэша, не перечитываются.
+- `slowmodeDefaultSeconds` — фикс. дефолт, без доп. `GetFullChannel` (§12.8).
+- Каналы в `banned`/`suspend` исключены из `getChannelsBatch` — повторных вызовов нет.
+
+Верхняя граница живых `GetParticipant` = число пишущихся каналов, не общее число.
+Прирост трафика относительно текущего кода — нулевой (текущий precheck уже делает один
+`GetParticipant`); новизна — разбор доп. флагов из **того же** ответа.
+
+---
+
+## 10. Диаграмма потока (precheck monitor-v5, шаг 5.3c)
+
+```
+   есть отправки? ── нет ─► читаем/копим DM, дальше (без GetParticipant)
+        │ да
+        ▼
+  GetParticipant(self, группа обсуждения)  ◄── peerCache (5.0)
+        │  (+ флаги группы из chats; broadcast.restricted из кэша join)
+        ▼
+  classifyWriteAccess(snapshot)  ──►  WriteAccessAction
+        │
+        ├─ ok ───────────────────────────────► фаза отправок 5.4–5.6
+        ├─ restricted / default_banned / ─► suspend(∞) [+restriction_reason] ─┐
+        ├─ slowmode ──────────────────────► suspend(slowmodeDefaultSeconds) ──┤
+        ├─ left/forbidden/banned/left ────► banned (авторотация) ─────────────┤─► recordWriteAccessEvent
+        ├─ join_to_send ──────────────────► addJoinQueue(link) ───────────────┤
+        └─ join_request ──────────────────► JoinChannel(заявка) + banned ─────┘
+                                    │
+                        markChannelProcessed → continue (R17)
+```
+
+Резерв (§6): `handlePostCommentSendError` → тег → `autorotate` / `suspend`(paid) +
+`recordWriteAccessEvent`.
+
+---
+
+## 11. Трассировка требований → решение
+
+| Требование | Где |
 |---|---|
-| R1 (постоянная И переменная) | §4.2: постоянная из БД гейтит, переменная живым `GetParticipant` |
-| R2 (проверять в группе обсуждения) | §2.1: `chatId` = группа обсуждения по модели данных |
-| R3 (постоянная разово при join) | §4.1 |
-| R4 (переменная живьём перед отправкой) | §4.2; §6 (раз на канал за прогон) |
-| R5 (бинарно, хотя бы текст) | §3: классификация по `send_messages`, типы контента не различаются |
-| R6 (единый признак + одна причина, отдельно от status) | §2.1 `write_access_reason` |
-| R7 (классификация причины) | §3 (маппинг сигнал→причина), §4 (простановка `write_access_reason`) |
-| R8 (постоянная → read-only, без выхода/ротации) | §5.2 |
-| R9 (переменная → кандидат на ротацию) | §5.1 |
-| R10 (`not_participant` → переменная) | §5.1 (`isPermanentReason=false`) |
-| R11 (`until_date` справочно) | §2.1 `write_access_until` |
-| R12 (slowmode не помечать) | §3, §4.3 (`classifySendError`→null) |
-| R13 (peer_flood — уровень аккаунта) | §4.3 (без изменений) |
-| R14 (реактивный резерв по коду ошибки) | §4.3 |
-| R15 (не повышать антиспам служебными вызовами) | §6 |
-| R16 (согласованность, без накопления расхождений) | §4.4 |
-| R17 (один прогон — одна попытка на канал) | §4.2 (precheck-пропуск + существующий `ChannelSkipError`) |
+| R1 (проверять перед отправкой) | §3 (precheck 5.3c) |
+| R2 (участник/цензы — группа; access — оба) | §3.1 |
+| R3 (каждый статус → событие ИО) | §5 |
+| R4 (`kicked_by`/`date`/`banned_rights`; `restriction_reason`) | §5.1 |
+| R5 (уровень канала/аккаунта) | §2.3, §1 |
+| R6/R7/R8/R9 (account → авторотация) | §2.3, §4.1, §7.1 |
+| R10 (restricted → suspend + не читать) | §4.2 |
+| R11 (`restriction_reason` в ИО) | §5.1 |
+| R12 (slowmode → temp suspend) | §4.2 |
+| R13 (join_to_send → вступление) | §4.3 |
+| R14 (join_request → заявка + авторотация) | §4.4 |
+| R15 (инверсия `banned_rights`, `until_date`) | §2.1 |
+| R16 (реактив — резерв) | §6 |
+| R17 (`default_banned_rights` → suspend∞) | §2.3 (шаг 2), §4.2 |
+| R18 (`paid` → suspend∞, реактивно) | §6 |
 
 ---
 
-## 8. Принятые решения по развилкам
+## 12. Принятые решения (подтверждено владельцем)
 
-Все развилки закрыты владельцем.
+1. **`paid`** → `suspend(∞)` + `write_access` событие (§6). Уровень канала,
+   авторотация бесполезна; канал не читаем.
+2. **`chatForbidden`/`channelForbidden`/`CHANNEL_PRIVATE` при чтении** → авторотация
+   (`banned`), не `not_found`. Меняется ветка monitor-v5 5.1 (§7.1).
+3. **`join_request` у состоящего аккаунта** → `ok` (ценз вступления влияет только на
+   неучастника).
+4. **Колонки `write_access_reason`/`write_access_until`** → оставить мёртвыми до
+   отдельной чистки (обратимость).
+5. **Ветка «не участник» без кэша флагов** → дефолт `autorotate`, без доп.
+   `GetFullChannel`.
+6. **Инициирование заявки `join_request`** → прямой `JoinChannel` из precheck
+   (заявка + авторотация в одном месте).
+7. **`default_banned_rights.send_messages` (все замьючены)** → `suspend(∞)`,
+   проактивно (R17). Иначе канал бесконечно ротируется вхолостую.
+8. **Длительность temp-suspend при slowmode** → фиксированный короткий дефолт
+   (`slowmodeDefaultSeconds`), без доп. `GetFullChannel`.
 
-1. **`write_access_checked_at`** — **не добавлять**. Модель данных: `write_access_reason` + `write_access_until` (§2.1).
-2. **`no_discussion`** — **вариант A**: строку `channels` не заводим, вступление в broadcast не делаем; пометка остаётся на уровне `join_queue` (`status='error'`). AC-2 трактуется как фиксация на уровне очереди вступления (§5.2).
-3. **Частота `GetParticipant`** — **один раз на канал за прогон монитора**, не перед каждым сообщением (§4.2, §6).
-4. **`chat_send_plain_forbidden`/`chat_send_media_forbidden`** — **как сейчас** (`format_error`), новую причину не заводим (§2.3).
-5. **Снятие причины** — **только в проверке перед прогоном отправок** (precheck), без дубля после успешной отправки (§4.4).
-6. **R17 (один прогон — одна попытка на канал)** — уточнение владельца к п.3: при зафиксированном «писать нельзя» (проактивно на precheck или по первой ошибке отправки) остальные отправки в канал в этом прогоне не инициируются. **Поведение уже обеспечено** существующим потоком `monitor-v5` (precheck-пропуск + `ChannelSkipError`), новый механизм не нужен (§4.2). В требованиях фиксируется отдельным R17 (заводит аналитик).
+---
+
+## 13. Риски / trade-offs
+
+- **R2 «на обоих» реализуется асимметрично:** discussion — живьём, broadcast — из
+  кэша. Строгое «живьём на обоих» удвоило бы `GetFullChannel` — компромисс по R15.
+  Риск: broadcast стал `restricted` после join и до полного прохода — ловится с
+  задержкой (реактивный резерв подстрахует).
+- **slowmode-suspend низкой ценности** при cadence монитора 72ч (slowmode почти
+  всегда истёк к следующему прогону). Реализуется фикс. дефолтом; при желании можно
+  положиться только на существующий `retryOnFloodWait`.
+- **Слияние ветки `CHANNEL_PRIVATE`** (§7.1) — прямое изменение общей точки monitor-v5
+  5.1; согласовать с `monitor-v5-hash-driven-sync` при реализации (приоритет — право
+  записи → авторотация).
+- **Файлы-опоры:** `src/skills/monitor-v5.ts` (precheck 5.3c, ветка 5.1),
+  `src/core/write-access.ts` (переписывается), `src/core/post-comment-send.ts` (резерв),
+  `src/core/db/channels.ts` (`markChannelStatus`, `expireChannelStatuses`, `getLeaveQueue`),
+  `src/core/db/channel-operations.ts` (тип `write_access`), `src/core/db/join-queue.ts`
+  (`addJoinQueue`), `src/core/telegram/service.ts` (`getSelfParticipant` под снимок,
+  `joinDiscussionGroups`), `src/features/channel-rotation/run.ts` (потребитель
+  `leaved_from_banned`, правок не требует).

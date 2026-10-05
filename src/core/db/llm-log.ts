@@ -66,6 +66,9 @@ export function withLlmLogging(base: LlmClient, agentId: string, skillType: stri
         get requestCount() {
             return base.requestCount;
         },
+        get tokenUsage() {
+            return base.tokenUsage;
+        },
         async complete(opts: LlmCompleteOptions) {
             const response = await base.complete(opts);
             recordLlmCall(agentId, { skillType, prompt: opts.prompt, response }, log);

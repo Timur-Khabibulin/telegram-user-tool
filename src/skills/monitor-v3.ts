@@ -12,6 +12,7 @@
 import { z } from "zod";
 
 import type { SkillContext, SkillStatus } from "./types";
+import { LlmCallError } from "../llm/error-class";
 import { sleep, FloodAbortError, withFloodRetry } from "./util";
 import { ClientNotConnectedError, FloodWaitError } from "../core/telegram/errors";
 import {
@@ -372,7 +373,7 @@ export async function runMonitorV3(ctx: SkillContext): Promise<SkillStatus> {
                 if (err instanceof PeerFloodError) {
                     return { status: "error", details: { step: "reply", reason: "peer_flood", chatId } };
                 }
-                if (err instanceof ChannelSkipError) {
+                if (err instanceof ChannelSkipError || err instanceof LlmCallError) {
                     channelsSkippedErrors += 1;
                 } else {
                     throw err;
@@ -553,7 +554,7 @@ export async function runMonitorV3(ctx: SkillContext): Promise<SkillStatus> {
             if (err instanceof PeerFloodError) {
                 return { status: "error", details: { step: "reply", reason: "peer_flood", chatId, commentsPosted } };
             }
-            if (err instanceof ChannelSkipError) {
+            if (err instanceof ChannelSkipError || err instanceof LlmCallError) {
                 channelsSkippedErrors += 1;
             } else {
                 throw err;

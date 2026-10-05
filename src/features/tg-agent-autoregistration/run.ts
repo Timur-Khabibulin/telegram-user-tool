@@ -14,6 +14,7 @@ import { computeAgentIdRange, checkAgentIdRangeFree } from "./id-range";
 import { stagingTdataDir, writeStagingStatus, readStagingStatus, promoteToWorkspace, type AccountStatus } from "./staging";
 import { assignDeviceForAgent, clearStagedDevice } from "./device-assignment";
 import type { ProxyConfig } from "../../core/config";
+import { loadAccountDefaults } from "../../core/config";
 import { readAccountPhone, connectBootstrap, prepareAccount, TdataSetupError } from "../../core/tdata";
 import { assignUsernameForAgent, clearStagedUsername } from "./username";
 import { selectWorkingProxy, type ProxySelectionOutcome } from "./proxy-selection";
@@ -52,9 +53,27 @@ export interface RunReport {
  * Нераспознанная ссылка — явная ошибка (вызывающий пометит аккаунт неуспехом
  * и продолжит пачку).
  */
-async function downloadTdataArchive(link: string, destTdataDir: string, log: Logger): Promise<void> {
-    if (isGoogleDriveLink(link)) return downloadTdataFromGDrive(link, destTdataDir, log);
-    if (/mega\.nz/i.test(link)) return downloadTdataFromMega(link, destTdataDir, log);
+/**
+ * Дополнительный файл из архива (кроме папки tdata): ищется по имени во всём
+ * распакованном дереве и копируется в destPath. Не найден — молча пропускается
+ * (это не ошибка скачивания; отсутствие обрабатывает потребитель). Используется
+ * для 2FA-пароля из файла архива (tg-agent-pool-provision).
+ */
+export interface ExtraFileRequest {
+    /** Имя файла для поиска (например "password.txt"). */
+    name: string;
+    /** Абсолютный путь назначения для найденного файла. */
+    destPath: string;
+}
+
+export async function downloadTdataArchive(
+    link: string,
+    destTdataDir: string,
+    log: Logger,
+    extraFile?: ExtraFileRequest,
+): Promise<void> {
+    if (isGoogleDriveLink(link)) return downloadTdataFromGDrive(link, destTdataDir, log, extraFile);
+    if (/mega\.nz/i.test(link)) return downloadTdataFromMega(link, destTdataDir, log, extraFile);
     throw new Error(`нераспознанный вид ссылки (ни Google Drive, ни Mega): ${link}`);
 }
 
@@ -64,7 +83,12 @@ async function downloadTdataArchive(link: string, destTdataDir: string, log: Log
  * номером аккаунта, внутри которой лежит папка `tdata` — её ищем по имени.
  * Один `loadAttributes()` на корне отдаёт всё вложенное дерево.
  */
-async function downloadTdataFromMega(link: string, destTdataDir: string, log: Logger): Promise<void> {
+async function downloadTdataFromMega(
+    link: string,
+    destTdataDir: string,
+    log: Logger,
+    extraFile?: ExtraFileRequest,
+): Promise<void> {
     const root = MegaFile.fromURL(link);
     await root.loadAttributes();
 
@@ -73,6 +97,16 @@ async function downloadTdataFromMega(link: string, destTdataDir: string, log: Lo
         throw new Error(`в архиве ${link} не найдена папка tdata`);
     }
     await downloadMegaFolder(tdataNode, destTdataDir);
+    if (extraFile) {
+        const node = findFileNode(root, extraFile.name);
+        if (node) {
+            fs.mkdirSync(path.dirname(extraFile.destPath), { recursive: true });
+            await downloadMegaFile(node, extraFile.destPath);
+            log.info(`[tg-agent-autoregistration] downloadTdataFromMega — доп. файл ${extraFile.name} скачан`);
+        } else {
+            log.warn(`[tg-agent-autoregistration] downloadTdataFromMega — доп. файл ${extraFile.name} в архиве не найден`);
+        }
+    }
     log.info(`[tg-agent-autoregistration] downloadTdataFromMega — скачано в ${destTdataDir}`);
 }
 
@@ -90,7 +124,12 @@ function extractGDriveFileId(link: string): string | null {
  * папку `tdata` и копирует её содержимое в `destTdataDir`. Большие файлы Google
  * отдаёт через HTML-интерстишл подтверждения — обрабатывается в downloadGDriveFile.
  */
-async function downloadTdataFromGDrive(link: string, destTdataDir: string, log: Logger): Promise<void> {
+async function downloadTdataFromGDrive(
+    link: string,
+    destTdataDir: string,
+    log: Logger,
+    extraFile?: ExtraFileRequest,
+): Promise<void> {
     const fileId = extractGDriveFileId(link);
     if (!fileId) throw new Error(`не удалось извлечь FILE_ID из Google Drive ссылки: ${link}`);
 
@@ -113,6 +152,16 @@ async function downloadTdataFromGDrive(link: string, destTdataDir: string, log: 
     }
     fs.mkdirSync(destTdataDir, { recursive: true });
     fs.cpSync(tdataSrc, destTdataDir, { recursive: true });
+    if (extraFile) {
+        const src = findFileOnDisk(extractDir, extraFile.name);
+        if (src) {
+            fs.mkdirSync(path.dirname(extraFile.destPath), { recursive: true });
+            fs.copyFileSync(src, extraFile.destPath);
+            log.info(`[tg-agent-autoregistration] downloadTdataFromGDrive — доп. файл ${extraFile.name} скопирован`);
+        } else {
+            log.warn(`[tg-agent-autoregistration] downloadTdataFromGDrive — доп. файл ${extraFile.name} в архиве не найден`);
+        }
+    }
     fs.rmSync(extractDir, { recursive: true, force: true });
     log.info(`[tg-agent-autoregistration] downloadTdataFromGDrive — скачано и распаковано в ${destTdataDir}`);
 }
@@ -185,6 +234,39 @@ function findTdataFolder(node: any): any | null {
         if (child.name === "tdata") return child;
         const found = findTdataFolder(child);
         if (found) return found;
+    }
+    return null;
+}
+
+/** Рекурсивный поиск файла по имени в распакованном дереве на диске (первое совпадение). */
+function findFileOnDisk(root: string, name: string): string | null {
+    const stack = [root];
+    while (stack.length > 0) {
+        const dir = stack.pop() as string;
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory()) stack.push(full);
+            else if (e.name === name) return full;
+        }
+    }
+    return null;
+}
+
+/** Рекурсивный поиск файла-ноды по имени в дереве Mega (первое совпадение). */
+function findFileNode(node: any, name: string): any | null {
+    for (const child of node.children ?? []) {
+        if (child.directory) {
+            const found = findFileNode(child, name);
+            if (found) return found;
+        } else if (child.name === name) {
+            return child;
+        }
     }
     return null;
 }
@@ -293,7 +375,7 @@ async function processAccount(
 ): Promise<AccountResult> {
     const tdataPath = stagingTdataDir(agentId);
     const username = assignUsernameForAgent(agentId, template.profileData.nick);
-    const { apiId, apiHash } = template.defaultAgentData;
+    const { apiId, apiHash } = loadAccountDefaults();
     const device = assignDeviceForAgent(agentId);
 
     let outcome;
@@ -314,7 +396,7 @@ async function processAccount(
                         apiHash,
                         phoneNumber,
                         proxy,
-                        template.defaultAgentData["2fa"],
+                        loadAccountDefaults()["2fa"],
                         log,
                     );
                     return { agentic, proxy };
@@ -375,6 +457,9 @@ function finalizeProxyOutcome(
         apiId,
         apiHash,
         sessionString: agentic.sessionString,
+        // Момент авторизации фиксируется вместе с новой sessionString
+        // (tg-peer-identity-model) — точка отсчёта актуальности access_hash.
+        sessionAuthorizedAt: Math.floor(Date.now() / 1000),
         persona: personName,
         username,
         proxy,
@@ -412,7 +497,7 @@ export async function retryManualCode(
     // Ретрай второй сессии — канал не создаётся (уже создан или mode A), канальные файлы не нужны.
     const template = loadPersonaTemplate(personName, false);
     const tdataPath = stagingTdataDir(agentId);
-    const { apiId, apiHash } = template.defaultAgentData;
+    const { apiId, apiHash } = loadAccountDefaults();
     const device = assignDeviceForAgent(agentId);
     // Тот же username, что уже применён к Telegram-аккаунту в первой попытке
     // (UpdateUsername в prepareAccount, до таймаута кода) — не генерировать другой.
@@ -435,7 +520,7 @@ export async function retryManualCode(
                         apiHash,
                         phoneNumber,
                         proxy,
-                        template.defaultAgentData["2fa"],
+                        loadAccountDefaults()["2fa"],
                         log,
                     );
                     return { agentic, proxy };

@@ -17,15 +17,17 @@ import { ConnectionTCPObfuscated } from "telegram/network/connection/TCPObfuscat
 import { computeCheck } from "telegram/Password";
 import type { Logger } from "../logger";
 import type { AccountConfig, ProxyConfig } from "../config";
-import { loadAccountConfig, FUNNEL_ADMIN_AGENT_ID, V5_SYNC_PAGE_SIZE, V5_SYNC_PAGE_DELAY_MIN_SEC, V5_SYNC_PAGE_DELAY_MAX_SEC } from "../config";
+import { loadAccountConfig, loadPoolAccountConfig, FUNNEL_ADMIN_AGENT_ID, V5_SYNC_PAGE_SIZE, V5_SYNC_PAGE_DELAY_MIN_SEC, V5_SYNC_PAGE_DELAY_MAX_SEC, PROXY_FAILURE_ROTATION_THRESHOLD, PROXY_ROTATION_MAX_CANDIDATES } from "../config";
 import { upsertRestriction, type RestrictionType } from "../db/agent-restrictions";
+import { incrementProxyFailures, resetProxyFailures, getProxyFailures } from "../db/proxy-health";
 import { GramJsBridgeLogger } from "./gramjs-logger";
 import { loadPersonaTemplate } from "../../features/tg-agent-autoregistration/persona-template";
 import { provisionProxyViaProbe } from "../../features/proxy/provision-via-probe";
 import { parseProxyCountry } from "../../features/proxy/provision-shared";
 import { createPersonaChannel } from "../tdata/account-setup";
+import { buildPostTextWithInviteLink } from "../persona-post";
 import { acquireSession, releaseSession } from "./session-lock";
-import type { SelfParticipantState } from "../write-access";
+import { SLOWMODE_SUSPEND_DEFAULT_SECONDS, type WriteAccessSnapshot, type DiscussionFlags } from "../write-access";
 export { FloodWaitError, ClientNotConnectedError, MissingAccountConfigError, ConnectTimeoutError, SessionRevokedError, AccountBannedError } from "./errors";
 import { FloodWaitError, ClientNotConnectedError, MissingAccountConfigError, ConnectTimeoutError, SessionRevokedError, AccountBannedError, parseFloodWait, classifyAccountError, classifyTelegramErrorTag, retryOnFloodWait } from "./errors";
 
@@ -244,6 +246,28 @@ function buildProxyOptions(proxy?: ProxyConfig) {
     };
 }
 
+/**
+ * Извлекает флаги группы обсуждения из объекта `channel` ответа `GetParticipant`
+ * (channel-write-access-proactive §3.1). `undefined` (неучастник — объекта нет) →
+ * все флаги false, что по §12.5 даёт авторотацию.
+ */
+function buildDiscussionFlags(chat: Api.Channel | undefined): DiscussionFlags {
+    const reasons = ((chat?.restrictionReason as any[]) ?? []).map((r) => ({
+        platform: String(r?.platform ?? ""),
+        reason: String(r?.reason ?? ""),
+        text: String(r?.text ?? ""),
+    }));
+    return {
+        left: chat?.left === true,
+        restricted: chat?.restricted === true,
+        restrictionReason: reasons,
+        slowmodeEnabled: chat?.slowmodeEnabled === true,
+        joinToSend: chat?.joinToSend === true,
+        joinRequest: chat?.joinRequest === true,
+        defaultBannedSendMessages: chat?.defaultBannedRights?.sendMessages === true,
+    };
+}
+
 // ─── Service ──────────────────────────────────────────────────────────
 
 export class TelegramService {
@@ -277,15 +301,37 @@ export class TelegramService {
     // аккаунтов, и при выселении клиента надо снять замок именно его агента.
     private readonly agentIdByKey = new Map<string, string>();
 
+    // proxy-failure-rotation: счётчик провалов боевого подключения ведём только для
+    // плановых процессов (диспетчер, ops-скрипты, funnel-tracker) — они вызывают
+    // enableProxyHealthTracking(). Долгоживущий gateway и override-подключения его не
+    // включают, поэтому по умолчанию выключено и поведение ensureClient для них не
+    // меняется. proxyHealthTouched — свёртка «один процесс = ±1 на агента»: первый
+    // боевой исход процесса по этому агенту решает счётчик, последующие подключения того
+    // же агента в этом же процессе (reconnect) его не трогают. Ключ — agentId, потому что
+    // один процесс funnel-tracker обходит много агентов, и у каждого свой счёт.
+    private proxyHealthTracking = false;
+    private readonly proxyHealthTouched = new Set<string>();
+
     constructor(private readonly log: Logger) {}
+
+    /** Включает ведение счётчика провалов прокси (proxy-failure-rotation) для этого
+     *  экземпляра сервиса. Вызывают плановые процессы: диспетчер, ops-скрипты,
+     *  funnel-tracker. Gateway и override-вызовы его не вызывают. */
+    enableProxyHealthTracking(): void {
+        this.proxyHealthTracking = true;
+    }
 
     // ── Account ───────────────────────────────────────────────────────
 
-    /** Загружает и фиксирует конфиг аккаунта агента. */
-    loadAccount(agentId: string): { ok: true; accountId: string } {
+    /** Загружает и фиксирует конфиг аккаунта агента. Для обезличенного пул-аккаунта
+     *  (tg-agent-pool-provisioning) — `{ pool: true }`: читается `loadPoolAccountConfig`
+     *  (без `persona`), персона на пул-соединении не используется (только getMe/setup). */
+    loadAccount(agentId: string, opts?: { pool?: boolean }): { ok: true; accountId: string } {
         const configPath = `~/.openclaw/workspace-${agentId}/tg-account.json`;
         this.log.info(`[telegram-user-tool] tg_load_account — loading from ${configPath}`);
-        const cfg = loadAccountConfig(agentId);
+        const cfg: AccountConfig = opts?.pool
+            ? { ...loadPoolAccountConfig(agentId), persona: "" }
+            : loadAccountConfig(agentId);
         this.accountConfig = cfg;
         this.agentId = agentId;
         this.log.info(`[telegram-user-tool] tg_load_account — loaded accountId=${cfg.accountId}`);
@@ -341,6 +387,12 @@ export class TelegramService {
             acquireSession(lockAgentId, "telegram-user-tool");
         }
 
+        // proxy-failure-rotation: счётчик боевых провалов ведём только на нормальном пути
+        // (не override) и только когда процесс включил ведение (плановые процессы). Так
+        // вложенный боевой verify кандидата (liveProbeProxy — самодостаточен, лок не
+        // трогает) и gateway остаются в стороне.
+        const trackHealth = !override && this.proxyHealthTracking && !!lockAgentId;
+
         if (!account.apiId || !account.apiHash) {
             this.log.error("[telegram-user-tool] ensureClient — missing apiId or apiHash");
             throw new MissingAccountConfigError(!account.apiId ? "apiId" : "apiHash");
@@ -391,7 +443,10 @@ export class TelegramService {
         }
 
         const MAX_ATTEMPTS = override?.maxAttempts ?? 3;
-        const CONNECT_TIMEOUT_MS = override?.connectTimeoutMs ?? 60_000;
+        // Таймаут коннекта 30с (2026-09-20; было 60→20, поднято до 30 для запаса на
+        // легитимный медленный коннект). Мёртвый прокси стоит 3×30=90с вместо 180с —
+        // прогоны (в т.ч. funnel по всему флоту) укладываются в лимит.
+        const CONNECT_TIMEOUT_MS = override?.connectTimeoutMs ?? 30_000;
         const proxyInfo = proxy ? ` via proxy ${proxy.host}:${proxy.port}` : "";
 
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -437,6 +492,16 @@ export class TelegramService {
                 this.log.info(
                     `[telegram-user-tool] ensureClient — connected as ${(me as any).firstName ?? ""} ${(me as any).lastName ?? ""} (ID: ${me.id})`,
                 );
+                // proxy-failure-rotation: успех боевого getMe обнуляет счётчик провалов
+                // (R5). Однократно на агента за процесс; лог только если было что сбрасывать.
+                if (trackHealth && !this.proxyHealthTouched.has(lockAgentId!)) {
+                    this.proxyHealthTouched.add(lockAgentId!);
+                    const prev = getProxyFailures(lockAgentId!);
+                    if (prev > 0) {
+                        resetProxyFailures(lockAgentId!);
+                        this.log.info(`[telegram-user-tool] proxy-health ${lockAgentId} — счётчик провалов сброшен (был ${prev})`);
+                    }
+                }
                 return client;
             } catch (err: any) {
                 await client.disconnect().catch(() => {});
@@ -453,15 +518,32 @@ export class TelegramService {
                     // снятием, что в disconnect(): один из отклонённых attempt'ов
                     // мог успеть установить соединение с Telegram до сбоя на
                     // getMe()/login — серверу нужно время увидеть его закрытым.
-                    if (!this.clients.has(key)) {
-                        await sleep(randomDelayMs(POST_DISCONNECT_DELAY_MIN_SEC, POST_DISCONNECT_DELAY_MAX_SEC));
-                        this.releaseFor(key, lockAgentId);
-                    }
                     // RPC-ошибки GramJS несут code/errorMessage как сырые поля (не
                     // regex по форматированному message) — классификация по тексту/коду,
                     // не только 401 (telegram-error-handling, охватывает и API_ID_INVALID/
                     // деактивацию/заморозку, если они всплывают уже на connect()/getMe()).
                     const accountFailure = classifyAccountError(err);
+                    // proxy-failure-rotation: провал СВЯЗНОСТИ (аккаунтные отсеяны — R4),
+                    // считаем ДО снятия замка — при достижении порога ротируем инлайн, и
+                    // лок должен оставаться за нами до успешного повтора на новом прокси.
+                    // Однократно на агента за процесс (R3).
+                    if (trackHealth && !accountFailure && proxy && !this.proxyHealthTouched.has(lockAgentId!)) {
+                        this.proxyHealthTouched.add(lockAgentId!);
+                        const failures = incrementProxyFailures(lockAgentId!, `${proxy.host}:${proxy.port}`);
+                        this.log.warn(
+                            `[telegram-user-tool] proxy-health ${lockAgentId} — боевое подключение провалено по связности, счётчик ${failures}/${PROXY_FAILURE_ROTATION_THRESHOLD}`,
+                        );
+                        if (failures >= PROXY_FAILURE_ROTATION_THRESHOLD) {
+                            const rotated = await this.rotateProxyByFailures(lockAgentId!, proxy, key);
+                            if (rotated) return rotated;
+                            // ротация не дала рабочего прокси (R12) — падаем как обычный
+                            // connect-fail ниже; счётчик уже сброшен в 0 самой ротацией.
+                        }
+                    }
+                    if (!this.clients.has(key)) {
+                        await sleep(randomDelayMs(POST_DISCONNECT_DELAY_MIN_SEC, POST_DISCONNECT_DELAY_MAX_SEC));
+                        this.releaseFor(key, lockAgentId);
+                    }
                     if (accountFailure === "need_update_session") {
                         this.restrictAgent(lockAgentId, "need_update_session", err);
                         throw new SessionRevokedError(err.code, err.errorMessage ?? err.message);
@@ -477,6 +559,101 @@ export class TelegramService {
 
         // Недостижимо: цикл на последней попытке либо возвращает client, либо бросает.
         throw new ConnectTimeoutError(CONNECT_TIMEOUT_MS, MAX_ATTEMPTS, MAX_ATTEMPTS, proxy);
+    }
+
+    /**
+     * proxy-failure-rotation (R6/R7/R12/R13/R14): порог подряд идущих провалов боевого
+     * подключения достигнут — ротируем прокси инлайн. Счётчик сбрасывается в 0 самим
+     * фактом ротации (R5), до исхода повтора. Кандидаты берутся тем же отбором из
+     * инвентаря asocks, что и probe-подбор (`provisionProxyViaProbe`), но проверяются
+     * БОЕВЫМ подключением (`liveProbeProxy` — реальный getMe), а не пустым probe (R13):
+     * пустой probe не отличил бы столь же деградировавший прокси. До 5 кандидатов (R14).
+     * При успехе — синхронизируем in-memory конфиг с записанным на диск и делаем свежий
+     * боевой connect на новом прокси (кэшируется, лок остаётся за нами). Возвращает
+     * подключённого клиента или null, если рабочего прокси нет / повтор не удался (R12).
+     */
+    private async rotateProxyByFailures(agentId: string, currentProxy: ProxyConfig, key: string): Promise<TelegramClient | null> {
+        resetProxyFailures(agentId);
+        const country = parseProxyCountry(currentProxy.username, currentProxy.countryCode);
+        if (!country) {
+            this.log.error(`[telegram-user-tool] proxy-health ${agentId} — страну прокси определить нельзя, ротация невозможна`);
+            return null;
+        }
+        this.log.warn(
+            `[telegram-user-tool] proxy-health ${agentId} — порог ${PROXY_FAILURE_ROTATION_THRESHOLD} достигнут, ротация прокси (до ${PROXY_ROTATION_MAX_CANDIDATES} кандидатов, боевая проверка)`,
+        );
+        const liveVerify = (candidate: ProxyConfig) => this.liveProbeProxy(candidate, 3, 30_000);
+        const replacement = await provisionProxyViaProbe(agentId, country, PROXY_ROTATION_MAX_CANDIDATES, liveVerify, this.log);
+        if (!replacement) {
+            this.log.warn(`[telegram-user-tool] proxy-health ${agentId} — ротация не нашла рабочий прокси, прогон завершится провалом связности`);
+            return null;
+        }
+        // provisionProxyViaProbe уже записал новый прокси в tg-account.json на диск;
+        // синхронизируем in-memory конфиг, чтобы свежий ensureClient пошёл через него.
+        if (this.accountConfig) this.accountConfig.proxy = replacement;
+        try {
+            const client = await this.ensureClient();
+            this.log.info(`[telegram-user-tool] proxy-health ${agentId} — ротация успешна, подключено через ${replacement.host}:${replacement.port}`);
+            return client;
+        } catch (err: any) {
+            this.log.warn(
+                `[telegram-user-tool] proxy-health ${agentId} — повтор на новом прокси ${replacement.host}:${replacement.port} не удался: ${err?.message ?? err}`,
+            );
+            return null;
+        }
+    }
+
+    /**
+     * Боевой аналог `probeProxy` для проверки кандидата при ротации (proxy-failure-rotation,
+     * R13): создаёт клиент с РЕАЛЬНОЙ сессией агента и данным прокси, делает connect + getMe
+     * под таймаутом, затем disconnect. Самодостаточен, как `probeProxy` — не трогает кэш
+     * клиентов и не управляет замком сессии (в отличие от `verifyConnection`, который идёт
+     * через `ensureClient` и снял бы замок внешнего прогона на провале кандидата). Успех
+     * подтверждает, что прокси проводит авторизованный трафик, а не только держит хендшейк.
+     * Бросает при неуспехе — контракт коллбэка `provisionProxyViaProbe`.
+     */
+    async liveProbeProxy(proxy: ProxyConfig, maxAttempts = 3, connectTimeoutMs = 30_000): Promise<void> {
+        const account = this.resolveAccountConfig();
+        if (!account.sessionString) throw new MissingAccountConfigError("sessionString");
+        this.log.info(
+            `[telegram-user-tool] liveProbeProxy — проверка ${proxy.host}:${proxy.port} (${maxAttempts} попыток × ${connectTimeoutMs / 1000}с, боевой getMe)`,
+        );
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const client = new TelegramClient(new StringSession(account.sessionString), account.apiId, account.apiHash, {
+                connectionRetries: 1,
+                autoReconnect: false,
+                retryDelay: 1000,
+                baseLogger: new GramJsBridgeLogger(this.log),
+                deviceModel:    account.device?.deviceModel,
+                systemVersion:  account.device?.systemVersion,
+                appVersion:     account.device?.appVersion,
+                langCode:       account.device?.langCode       ?? "ru",
+                systemLangCode: account.device?.systemLangCode ?? "ru",
+                connection: ConnectionTCPObfuscated,
+                useWSS: false,
+                ...buildProxyOptions(proxy),
+            });
+            try {
+                const connectTimeout = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error(`connect timed out after ${connectTimeoutMs / 1000}s`)), connectTimeoutMs),
+                );
+                await Promise.race([client.connect(), connectTimeout]);
+                const getMeTimeout = new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error(`getMe timed out after ${connectTimeoutMs / 1000}s`)), connectTimeoutMs),
+                );
+                await Promise.race([client.getMe(), getMeTimeout]);
+                await client.disconnect().catch(() => {});
+                this.log.info(`[telegram-user-tool] liveProbeProxy — OK на попытке ${attempt}/${maxAttempts}`);
+                return;
+            } catch (err: any) {
+                await client.disconnect().catch(() => {});
+                this.log.warn(`[telegram-user-tool] liveProbeProxy — попытка ${attempt}/${maxAttempts} провалена: ${err?.message ?? err}`);
+                if (attempt === maxAttempts) {
+                    throw new ConnectTimeoutError(connectTimeoutMs, attempt, maxAttempts, proxy, err);
+                }
+            }
+        }
     }
 
     /** Возвращает подключённый клиент или бросает конкретный подкласс ClientNotConnectedError. */
@@ -1638,7 +1815,7 @@ export class TelegramService {
      * (`default_banned_rights.send_messages`) берётся из `chats` того же ответа и
      * уточняет can_write без отдельного вызова. Аккаунтные/флуд-ошибки пробрасываются.
      */
-    async getSelfParticipant(chatId: string): Promise<SelfParticipantState> {
+    async getSelfParticipant(chatId: string): Promise<WriteAccessSnapshot> {
         const client = await this.requireClient();
         const peer = this.peerCache.get(chatId);
         if (!(peer instanceof Api.InputPeerChannel)) {
@@ -1653,15 +1830,22 @@ export class TelegramService {
                 (c) => c instanceof Api.Channel && c.id?.toString() === peer.channelId.toString(),
             ) as Api.Channel | undefined;
             return {
-                kind: "participant",
-                participant: res.participant,
-                defaultBannedSendMessages: discussionChat?.defaultBannedRights?.sendMessages === true,
+                discussion: buildDiscussionFlags(discussionChat),
+                participant: { kind: "participant", participant: res.participant },
+                slowmodeDefaultSeconds: SLOWMODE_SUSPEND_DEFAULT_SECONDS,
             };
         } catch (err: any) {
             if (err instanceof ClientNotConnectedError) throw err;
             const msg: string = err?.errorMessage ?? err?.message ?? String(err);
-            if (msg.includes("USER_NOT_PARTICIPANT")) return { kind: "not_participant" };
-            if (msg.includes("USER_BANNED_IN_CHANNEL")) return { kind: "banned_in_channel" };
+            // Флаги группы недоступны без объекта channel — дефолты (false) дают
+            // авторотацию по §12.5 (не участник без кэша флагов).
+            if (msg.includes("USER_NOT_PARTICIPANT"))
+                return { discussion: buildDiscussionFlags(undefined), participant: { kind: "not_participant" }, slowmodeDefaultSeconds: SLOWMODE_SUSPEND_DEFAULT_SECONDS };
+            if (msg.includes("USER_BANNED_IN_CHANNEL"))
+                return { discussion: buildDiscussionFlags(undefined), participant: { kind: "banned_in_channel" }, slowmodeDefaultSeconds: SLOWMODE_SUSPEND_DEFAULT_SECONDS };
+            // Доступ к каналу потерян (channel-write-access-proactive §12.2, R7) → авторотация.
+            if (msg.includes("CHANNEL_PRIVATE"))
+                return { discussion: buildDiscussionFlags(undefined), participant: { kind: "forbidden" }, slowmodeDefaultSeconds: SLOWMODE_SUSPEND_DEFAULT_SECONDS };
             throw err;
         }
     }
@@ -2355,10 +2539,9 @@ export class TelegramService {
         const post = await this.readPersonalChannelPost();
         if (!post.ok) return post;
 
-        const LINK_LINE = /^https?:\/\/\S+$/;
-        const kept = post.text.split("\n").filter((line) => !LINK_LINE.test(line.trim()));
-        const base = kept.join("\n").replace(/\s+$/u, "");
-        const newText = `${base}\n${link}\n${link}\n${link}`;
+        // Единое правило «снять строки-URL, дописать ссылку 3×» — общее с созданием
+        // поста в фазе 2 (core/persona-post).
+        const newText = buildPostTextWithInviteLink(post.text, link);
 
         const client = await this.requireClient();
         try {

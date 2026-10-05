@@ -21,6 +21,7 @@
 import { z } from "zod";
 
 import type { SkillContext, SkillStatus } from "./types";
+import { LlmCallError } from "../llm/error-class";
 import { sleep, FloodAbortError, withFloodRetry } from "./util";
 import { parseFloodWait, classifyTelegramErrorTag, ClientNotConnectedError } from "../core/telegram/errors";
 import {
@@ -88,9 +89,9 @@ class PeerFloodError extends Error {
     }
 }
 
-/** Окно правила «10 каналов banned за сутки» (agent-restrictions, суспенд-триггер 2). */
+/** Окно правила «30 каналов banned за сутки» (agent-restrictions, суспенд-триггер 2). */
 const RECENTLY_BANNED_WINDOW_SECONDS = 86400;
-const RECENTLY_BANNED_THRESHOLD = 10;
+const RECENTLY_BANNED_THRESHOLD = 30;
 
 const THREAD_EXPIRE_SECONDS = 345600; // 4 дня — экспирация тредов по последней активности (не связано с гейтом свежести)
 const GET_MESSAGES_LIMIT = 1000;
@@ -535,7 +536,7 @@ export async function runMonitorV2(ctx: SkillContext): Promise<SkillStatus> {
                 const repliesSent = repliesNewThreads + repliesThreadContinuations + repliesGeneral;
                 return { status: "error", details: { step: "reply", reason: "peer_flood", chatId, repliesSent, candidatesAdded } };
             }
-            if (err instanceof ChannelSkipError) {
+            if (err instanceof ChannelSkipError || err instanceof LlmCallError) {
                 // Не-flood ошибка отправки ответа — пропустить канал, продолжить прогон.
                 // Ошибка уже записана в send_errors внутри обёртки sendReply.
                 markChannelProcessed(agentId, chatId, log);

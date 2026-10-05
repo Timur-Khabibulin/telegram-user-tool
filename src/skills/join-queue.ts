@@ -9,7 +9,6 @@ import type { SkillContext, SkillStatus } from "./types";
 import { getJoinQueueBatch, updateJoinQueue } from "../core/db/join-queue";
 import { recordAccountError } from "../core/db/error-log";
 import { upsertChannelIdentityFromJoin } from "../core/db/channels";
-import { classifyDefaultBannedRights } from "../core/write-access";
 import { randomBetween } from "./util";
 
 const BATCH_LIMIT_MIN = 5;
@@ -69,11 +68,10 @@ export async function runJoinQueue(ctx: SkillContext): Promise<SkillStatus> {
     for (const result of summary.results) {
         if (result.status === "joined") {
             if (result.identity) {
-                // channel-write-access (§4.1): постоянную величину права записи
-                // классифицируем при вступлении и пишем перезаписью (успешный join
-                // заново снимает залипшую причину).
-                const writeAccessReason = classifyDefaultBannedRights(result.identity.defaultBannedSendMessages);
-                upsertChannelIdentityFromJoin(agentId, result.identity, writeAccessReason, log);
+                // channel-write-access-proactive: постоянную величину права записи
+                // (`default_banned_rights`) при join больше не классифицируем —
+                // её снимает проактивная проверка перед отправкой (precheck monitor-v5).
+                upsertChannelIdentityFromJoin(agentId, result.identity, null, log);
             }
             updateJoinQueue(agentId, result.link, "joined", undefined, log);
             continue;

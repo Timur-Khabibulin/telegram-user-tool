@@ -19,6 +19,7 @@
 import { z } from "zod";
 
 import type { SkillContext, SkillStatus } from "./types";
+import { LlmCallError } from "../llm/error-class";
 import { sleep, FloodAbortError, withFloodRetry } from "./util";
 import { parseFloodWait, ClientNotConnectedError } from "../core/telegram/errors";
 import {
@@ -342,7 +343,7 @@ export async function runMonitor(ctx: SkillContext): Promise<SkillStatus> {
                 const repliesSent = repliesNewThreads + repliesThreadContinuations + repliesGeneral;
                 return { status: "error", details: { step: "reply", reason: "repeated_flood_wait", chatId, repliesSent, candidatesAdded } };
             }
-            if (err instanceof ChannelSkipError) {
+            if (err instanceof ChannelSkipError || err instanceof LlmCallError) {
                 // Не-flood ошибка отправки ответа — пропустить канал, продолжить прогон.
                 // Ошибка уже записана в send_errors внутри обёртки sendReply.
                 markChannelProcessed(agentId, chatId, log);

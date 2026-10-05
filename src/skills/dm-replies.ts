@@ -14,6 +14,7 @@ import type { SkillContext, SkillStatus } from "./types";
 import { ClientNotConnectedError } from "../core/telegram/errors";
 import { getDmThreadsByUsers, updateDmThreadMsgs, type DmThreadMessage } from "../core/db/dm-threads";
 import { analyzeAndReply } from "../llm/prompts";
+import { LlmCallError } from "../llm/error-class";
 
 const GET_MESSAGES_LIMIT = 100;
 
@@ -85,10 +86,21 @@ export async function runDmReplies(ctx: SkillContext): Promise<SkillStatus> {
         const historyLines = stored.map((m) => `${m.role}: ${m.text}`).join("\n");
         const newLines = newMessages.map((m) => `${m.fromName}: ${m.text}`).join("\n");
         const analyzePrompt = analyzeAndReply(thread.triggerMessage, historyLines, newLines);
-        const analysis = await llm.completeObject(
-            { system: persona, prompt: analyzePrompt },
-            z.object({ sentiment: z.enum(["positive", "negative"]), ответ: z.string().nullish() }),
-        );
+        // Неуспех LLM по одному треду не роняет прогон (R19): помечаем прочитанным и к следующему.
+        let analysis: { sentiment: "positive" | "negative"; ответ?: string | null };
+        try {
+            analysis = await llm.completeObject(
+                { system: persona, prompt: analyzePrompt },
+                z.object({ sentiment: z.enum(["positive", "negative"]), ответ: z.string().nullish() }),
+            );
+        } catch (err: any) {
+            if (err instanceof LlmCallError) {
+                log.warn(`[dm-replies] LLM по треду userId=${thread.userId} не удался (${err.errorClass}) — пропуск: ${err.message}`);
+                await tg.markAsRead(thread.userId, maxNewId);
+                continue;
+            }
+            throw err;
+        }
 
         if (analysis.sentiment === "negative" || !analysis.ответ) {
             await tg.markAsRead(thread.userId, maxNewId);

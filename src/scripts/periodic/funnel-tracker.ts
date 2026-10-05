@@ -6,8 +6,9 @@
 // дневные агрегаты), рендерит отчёт-воронку и шлёт в Saved Messages получателя.
 // --admin задаёт владельца данных (funnel.db/reports/, по умолчанию agent1),
 // --send-as — получателя отчёта (по умолчанию REPORT_AGENT_ID) — независимые
-// параметры, не обязаны совпадать.
-// Запуск: `tsx funnel-tracker.ts --admin agent1 --send-as agent27 --private-channel <id>`.
+// параметры, не обязаны совпадать. Приватный канал воронки резолвится per-persona
+// из profile_data.json (per-persona-funnel-channel), отдельного аргумента нет.
+// Запуск: `tsx funnel-tracker.ts --admin agent1 --send-as agent27`.
 
 import * as fs from "fs";
 import * as path from "path";
@@ -15,7 +16,7 @@ import * as path from "path";
 import type { Logger } from "../../core/logger";
 import { TelegramService } from "../../core/telegram/service";
 import { finishedDayWindow } from "../../features/funnel/runs-summary";
-import { FUNNEL_ADMIN_AGENT_ID, FUNNEL_PRIVATE_CHANNEL_ID, REPORT_AGENT_ID } from "../../core/config";
+import { FUNNEL_ADMIN_AGENT_ID, REPORT_AGENT_ID } from "../../core/config";
 import { ensureFunnelSchema } from "../../core/db/funnel";
 import { collectFunnel, withTimeout } from "../../features/funnel/funnel-collect";
 import { renderFunnel, buildFunnelCsv, funnelCsvPath } from "../../features/funnel/funnel-report";
@@ -38,7 +39,6 @@ async function main(): Promise<void> {
     const argv = process.argv.slice(2);
     const adminAgentId = parseArg(argv, "--admin") ?? FUNNEL_ADMIN_AGENT_ID;
     const sendAsAgentId = parseArg(argv, "--send-as") ?? REPORT_AGENT_ID;
-    const privateChannelId = parseArg(argv, "--private-channel") ?? FUNNEL_PRIVATE_CHANNEL_ID;
 
     ensureFunnelSchema(adminAgentId);
 
@@ -46,10 +46,13 @@ async function main(): Promise<void> {
     const window = finishedDayWindow();
 
     const tg = new TelegramService(log);
+    // proxy-failure-rotation: funnel-tracker — плановый процесс, ведёт счётчик провалов
+    // прокси (per-agent: за один прогон обходит много агентов, у каждого свой счёт).
+    tg.enableProxyHealthTracking();
     try {
         const result = await collectFunnel(
             tg,
-            { window, persist: true, adminAgentId, privateChannelId, disconnectAfterEachAgent: true },
+            { window, persist: true, adminAgentId, disconnectAfterEachAgent: true },
             log,
         );
 

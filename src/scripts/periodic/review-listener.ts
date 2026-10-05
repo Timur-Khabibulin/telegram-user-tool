@@ -18,7 +18,7 @@ import { TelegramService } from "../../core/telegram/service";
 import { ClientNotConnectedError } from "../../core/telegram/errors";
 import { withFloodRetry, FloodAbortError } from "../../skills/util";
 import { getPendingReview, resolvePendingReview, type PendingReviewRow } from "../../core/db/pending-reviews";
-import { markPostSeen, getChatAccessHash, getChatTitlesAndUsernames } from "../../core/db/channels";
+import { markPostSeen, getFreshChatAccessHash, saveChatAccessHash, getChatTitlesAndUsernames } from "../../core/db/channels";
 import { applyApprovedComment, handlePostCommentSendError } from "../../core/post-comment-send";
 import {
     getReviewCallbackUpdates,
@@ -46,13 +46,30 @@ async function handleApprove(cb: ReviewCallback, review: PendingReviewRow): Prom
     }
 
     try {
-        const accessHash = getChatAccessHash(cb.agentId, review.chatId, log);
-        if (!accessHash) {
-            log.error(`[review-listener] chatAccessHash не найден для agentId=${cb.agentId} chatId=${review.chatId}`);
-            await answerCallbackQuery(cb.callbackQueryId, log, "Ошибка: нет данных о чате, попробуйте позже").catch(() => {});
-            return;
+        // tg-peer-identity-model: используем сохранённый access_hash ТОЛЬКО если он
+        // действителен для текущей авторизации. Иначе (нет отметки/устарел после
+        // reauth) переполучаем проходом диалогов по стабильному chatId (§3.2) и
+        // персистим свежий хэш обратно.
+        const sessionAuthorizedAt = tg.getAccountConfig().sessionAuthorizedAt;
+        const freshHash = getFreshChatAccessHash(cb.agentId, review.chatId, sessionAuthorizedAt, log);
+        if (freshHash) {
+            tg.seedPeerCache(review.chatId, freshHash);
+        } else {
+            try {
+                await tg.populatePeerCacheForIds([review.chatId]);
+            } catch (err: any) {
+                log.error(`[review-listener] переполучение access_hash не удалось agentId=${cb.agentId} chatId=${review.chatId}: ${err?.message ?? err}`);
+                await answerCallbackQuery(cb.callbackQueryId, log, "Ошибка: не удалось получить данные чата, попробуйте позже").catch(() => {});
+                return;
+            }
+            const refreshed = tg.getCachedChatAccessHash(review.chatId);
+            if (!refreshed) {
+                log.error(`[review-listener] чат недоступен в диалогах agentId=${cb.agentId} chatId=${review.chatId}`);
+                await answerCallbackQuery(cb.callbackQueryId, log, "Ошибка: чат недоступен, попробуйте позже").catch(() => {});
+                return;
+            }
+            saveChatAccessHash(cb.agentId, review.chatId, refreshed, log);
         }
-        tg.seedPeerCache(review.chatId, accessHash);
 
         let sent: { messageId: number };
         try {

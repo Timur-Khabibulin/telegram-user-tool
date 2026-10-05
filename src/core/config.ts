@@ -38,6 +38,11 @@ export interface AccountConfig {
     apiId: number;
     apiHash: string;
     sessionString: string;
+    /** Unix-секунды момента записи текущей sessionString (tg-peer-identity-model).
+     *  Точка отсчёта актуальности access_hash: хэш из БД валиден только если получен
+     *  не раньше этого момента (см. core/db/peer-identity). Отсутствует у старых
+     *  конфигов — тогда любой сохранённый access_hash считается невалидным. */
+    sessionAuthorizedAt?: number;
     /** Имя папки шаблона персоны в ~/.openclaw/personas/<persona>/ (agent-persona-template). */
     persona: string;
     /** Telegram @username аккаунта — ставится при регистрации (tg-agent-autoregistration,
@@ -186,6 +191,40 @@ export function llmLogDbPath(agentId: string): string {
 export function pendingReviewsDbPath(agentId: string): string {
     return path.join(workspaceDir(agentId), "pending-reviews.db");
 }
+
+// ── Пул codex-подписок (llm-multi-account-failover) ─────────────────────────
+// Каталог со слотами codex-аккаунтов: ~/.openclaw/codex-auth/. Внутри — либо
+// подкаталоги-слоты <slot>/auth.json (несколько аккаунтов), либо легаси-файл
+// auth.json напрямую (один аккаунт = слот "default").
+
+/** Корень каталога codex-слотов: ~/.openclaw/codex-auth. */
+export function codexAuthRoot(): string {
+    return path.join(os.homedir(), ".openclaw", "codex-auth");
+}
+
+/** Host-level БД cooldown codex-аккаунтов: ~/.openclaw/codex-cooldown.db (общая на хост). */
+export function codexCooldownDbPath(): string {
+    return path.join(os.homedir(), ".openclaw", "codex-cooldown.db");
+}
+
+/**
+ * Порядок и состав codex-слотов из env `CODEX_ACCOUNTS` (список имён слотов слева
+ * направо = приоритет). Пусто/не задан → `[]` (тогда codex-pool применяет автодискавери
+ * подкаталогов codexAuthRoot()). Загружается из `~/.openclaw/secrets.env` (systemd
+ * EnvironmentFile), как остальные секреты.
+ */
+export const CODEX_ACCOUNTS: string[] = (process.env.CODEX_ACCOUNTS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+/**
+ * Консервативное окно cooldown (секунды), если `/wham/usage` недоступен при usage_limit
+ * (llm-multi-account-failover §9-D). По умолчанию 5 часов — размер primary-окна лимита.
+ */
+export const CODEX_COOLDOWN_FALLBACK_SECONDS = Number(
+    process.env.CODEX_COOLDOWN_FALLBACK_SECONDS ?? 18000,
+);
 
 /** Папка tdata существующего агента — конвенция, совпадает с финальным
  *  расположением tdata у tg-agent-autoregistration (design.md D2 в
@@ -467,14 +506,6 @@ export const FUNNEL_ADMIN_AGENT_ID = "agent1";
  */
 export const REPORT_AGENT_ID = "agent27";
 
-/**
- * ID приватного канала для подсчёта заявок на вступление (agent1 — админ).
- * Формат — как в get_dialogs / tg-channels.db (вид -100…). Захардкожен здесь
- * как единый источник истины: и инструмент tg_funnel_report, и скрипт-таймер
- * берут это значение (скрипт может переопределить аргументом --private-channel).
- */
-export const FUNNEL_PRIVATE_CHANNEL_ID = "-1003698044714";
-
 /** Общий каталог шаблонов персон: ~/.openclaw/personas/<personName>/ (agent-persona-template). */
 export function personasRoot(): string {
     return path.join(os.homedir(), ".openclaw", "personas");
@@ -487,6 +518,34 @@ export function personasRoot(): string {
  */
 export function personaSoulPath(personName: string): string {
     return path.join(personasRoot(), personName, "SOUL.md");
+}
+
+/** Общие для всех аккаунтов технические значения (tg-agent-pool-provisioning):
+ *  apiId/apiHash и целевой 2FA-пароль. Вынесены из персоны в общую заготовку —
+ *  идентичны у всех персон, это пул-константы, а не свойство персоны. */
+export interface AccountDefaults {
+    apiId: number;
+    apiHash: string;
+    "2fa": string;
+}
+
+/** Каталог общей заготовки учётных данных: ~/.openclaw/account-defaults/. */
+export function accountDefaultsRoot(): string {
+    return path.join(os.homedir(), ".openclaw", "account-defaults");
+}
+
+/**
+ * Читает общую заготовку `~/.openclaw/account-defaults/default_agent_data.json`.
+ * Единственный источник общих apiId/apiHash/2FA после выноса их из персоны —
+ * читает только продюсер пула (фаза 1) и пути реавторизации/подготовки аккаунта.
+ */
+export function loadAccountDefaults(): AccountDefaults {
+    const p = path.join(accountDefaultsRoot(), "default_agent_data.json");
+    const data = JSON.parse(fs.readFileSync(p, "utf-8"));
+    if (!data.apiId || !data.apiHash || !data["2fa"]) {
+        throw new Error(`account-defaults неполон (нужны apiId, apiHash, 2fa): ${p}`);
+    }
+    return { apiId: Number(data.apiId), apiHash: String(data.apiHash), "2fa": String(data["2fa"]) };
 }
 
 // ─── Загрузка конфигурации аккаунта ───────────────────────────────────
@@ -512,6 +571,71 @@ export function isReviewGateEnabled(agentId: string): boolean {
     }
 }
 
+/** Разбор блока proxy из сырого tg-account.json (общий для рабочего и пул-загрузчика). */
+function parseProxyConfig(cfg: any): ProxyConfig | undefined {
+    if (!cfg.proxy) return undefined;
+    const { type, host, port, username, password, name, countryCode, state, city } = cfg.proxy;
+    if (!host || !port) {
+        throw new Error("tg-account.json proxy is missing required fields: host, port");
+    }
+    return {
+        type: type === "socks4" ? "socks4" : "socks5",
+        host: String(host),
+        port: Number(port),
+        username: username ? String(username) : undefined,
+        password: password ? String(password) : undefined,
+        name: name ? String(name) : undefined,
+        countryCode: countryCode ? String(countryCode) : undefined,
+        state: state ? String(state) : undefined,
+        city: city ? String(city) : undefined,
+    };
+}
+
+/** Разбор блока device из сырого tg-account.json (общий для рабочего и пул-загрузчика). */
+function parseDeviceConfig(cfg: any): DeviceConfig | undefined {
+    if (!cfg.device || typeof cfg.device !== "object") return undefined;
+    const d = cfg.device;
+    return {
+        deviceModel:    d.deviceModel    ? String(d.deviceModel)    : undefined,
+        systemVersion:  d.systemVersion  ? String(d.systemVersion)  : undefined,
+        appVersion:     d.appVersion     ? String(d.appVersion)     : undefined,
+        langCode:       d.langCode       ? String(d.langCode)       : undefined,
+        systemLangCode: d.systemLangCode ? String(d.systemLangCode) : undefined,
+    };
+}
+
+/**
+ * Конфиг обезличенного пул-аккаунта (tg-agent-pool-provisioning): без `persona`
+ * и без `username`. Отдельно от `loadAccountConfig`, который остаётся строгим для
+ * рабочего контура (требует `persona`) — пул читается только этим загрузчиком.
+ */
+export interface PoolAccountConfig {
+    accountId: string;
+    apiId: number;
+    apiHash: string;
+    sessionString: string;
+    sessionAuthorizedAt?: number;
+    device?: DeviceConfig;
+    proxy?: ProxyConfig;
+}
+
+export function loadPoolAccountConfig(poolId: string): PoolAccountConfig {
+    const raw = fs.readFileSync(accountConfigPath(poolId), "utf-8");
+    const cfg = JSON.parse(raw);
+    if (!cfg.apiId || !cfg.apiHash || !cfg.sessionString) {
+        throw new Error("pool tg-account.json is missing required fields: apiId, apiHash, sessionString");
+    }
+    return {
+        accountId: cfg.accountId ?? poolId,
+        apiId: Number(cfg.apiId),
+        apiHash: String(cfg.apiHash),
+        sessionString: String(cfg.sessionString),
+        sessionAuthorizedAt: cfg.sessionAuthorizedAt != null ? Number(cfg.sessionAuthorizedAt) : undefined,
+        device: parseDeviceConfig(cfg),
+        proxy: parseProxyConfig(cfg),
+    };
+}
+
 export function loadAccountConfig(agentId: string): AccountConfig {
     const configPath = accountConfigPath(agentId);
     const raw = fs.readFileSync(configPath, "utf-8");
@@ -521,42 +645,15 @@ export function loadAccountConfig(agentId: string): AccountConfig {
         throw new Error("tg-account.json is missing required fields: apiId, apiHash, sessionString, persona");
     }
 
-    let proxy: ProxyConfig | undefined;
-    if (cfg.proxy) {
-        const { type, host, port, username, password, name, countryCode, state, city } = cfg.proxy;
-        if (!host || !port) {
-            throw new Error("tg-account.json proxy is missing required fields: host, port");
-        }
-        proxy = {
-            type: type === "socks4" ? "socks4" : "socks5",
-            host: String(host),
-            port: Number(port),
-            username: username ? String(username) : undefined,
-            password: password ? String(password) : undefined,
-            name: name ? String(name) : undefined,
-            countryCode: countryCode ? String(countryCode) : undefined,
-            state: state ? String(state) : undefined,
-            city: city ? String(city) : undefined,
-        };
-    }
-
-    let device: DeviceConfig | undefined;
-    if (cfg.device && typeof cfg.device === "object") {
-        const d = cfg.device;
-        device = {
-            deviceModel:    d.deviceModel    ? String(d.deviceModel)    : undefined,
-            systemVersion:  d.systemVersion  ? String(d.systemVersion)  : undefined,
-            appVersion:     d.appVersion     ? String(d.appVersion)     : undefined,
-            langCode:       d.langCode       ? String(d.langCode)       : undefined,
-            systemLangCode: d.systemLangCode ? String(d.systemLangCode) : undefined,
-        };
-    }
+    const proxy = parseProxyConfig(cfg);
+    const device = parseDeviceConfig(cfg);
 
     return {
         accountId: cfg.accountId ?? "default",
         apiId: Number(cfg.apiId),
         apiHash: String(cfg.apiHash),
         sessionString: String(cfg.sessionString),
+        sessionAuthorizedAt: cfg.sessionAuthorizedAt != null ? Number(cfg.sessionAuthorizedAt) : undefined,
         persona: String(cfg.persona),
         username: cfg.username ? String(cfg.username) : undefined,
         device,
@@ -582,8 +679,11 @@ export const V5_BATCH_LIMIT = 20;
 /** Потолок уникальных каналов с реально отправленным сообщением за один
  * прогон monitor-v5 — по достижении прогон останавливается полностью, не
  * дожидаясь исчерпания V5_BATCH_LIMIT (monitor-v5-session-send-cap
- * design.md Decision 1-2). Считаются каналы, не отдельные сообщения. */
-export const V5_SESSION_SEND_CAP = 3;
+ * design.md Decision 1-2). Считаются каналы, не отдельные сообщения.
+ * История: 3 → 7 → 20 ради скорости обработки очереди назревших каналов.
+ * При 5-8 прогонах/сутки 20 даёт ≈100-160 отправок/сутки на агента (было ≈35-56
+ * при 7). Выше активность на аккаунт — выше и риск спам-детекта/бана Telegram. */
+export const V5_SESSION_SEND_CAP = 20;
 
 /** Пауза после канала, в котором было что читать, сек. */
 export const V5_DELAY_ACTIVE_MIN_SEC = 20;
@@ -597,10 +697,6 @@ export const V5_DELAY_EMPTY_MAX_SEC = 20;
  * backlog после простоя) — было лимитом одного вызова getMessages, теперь
  * канал читается чанками (V5_MSG_CHUNK_MIN/MAX). */
 export const V5_GET_MESSAGES_LIMIT = 200;
-
-/** Раз в сколько секунд (не чаще) monitor-v5 делает полную синхронизацию
- * списка каналов (listGroupChannels/syncChannels/cacheChannelIdentities). */
-export const V5_FULL_SYNC_PERIOD_SECONDS = 86400;
 
 /** Размер страницы при постраничном listGroupChannels и пауза между
  * страницами, сек. */
@@ -640,6 +736,19 @@ export const V5_TYPING_MAX_SEC = 120;
  */
 export const V5_WAKE_GAP_MIN_SEC = Math.round(2.5 * 3600);
 export const V5_WAKE_GAP_MAX_SEC = 4 * 3600;
+
+// ─── proxy-failure-rotation ────────────────────────────────────────────
+//
+// Второй триггер ротации прокси: по подряд идущим провалам БОЕВОГО подключения
+// (не пустого probe). Порог — число провальных по связности прогонов подряд на
+// текущем прокси, после которого прокси ротируется. Дефолт 2 (≈5-8ч при кадансе
+// V5_WAKE_GAP выше ≪ суток) и не срабатывает на единичном сбое. Число кандидатов
+// при ротации — отдельный параметр, не совпадает с порогом.
+
+/** Порог подряд идущих провалов боевого подключения, после которого ротируем прокси. */
+export const PROXY_FAILURE_ROTATION_THRESHOLD = Number(process.env.PROXY_FAILURE_ROTATION_THRESHOLD ?? 2);
+/** Сколько кандидатов asocks перебирать при ротации (боевой verify каждого). */
+export const PROXY_ROTATION_MAX_CANDIDATES = 5;
 
 // ─── leave-banned-channels human pacing (leave-banned-human-pacing) ────
 //

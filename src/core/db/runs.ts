@@ -20,6 +20,9 @@ export interface RunRow {
     llmCalls: number;
     cpuUserMs: number;   // process.cpuUsage().user, снятый вокруг вызова скилла
     cpuSystemMs: number; // process.cpuUsage().system, снятый вокруг вызова скилла
+    inputTokens: number;  // суммарные prompt-токены LLM за прогон (llm.tokenUsage, после − до)
+    outputTokens: number; // суммарные completion-токены LLM за прогон
+    totalTokens: number;  // суммарные токены за прогон (по данным провайдера)
 }
 
 function openDb(dbPath: string): Database.Database {
@@ -55,6 +58,17 @@ function ensureTable(db: Database.Database, dbPath: string): void {
     if (!columnNames.has("cpuSystemMs")) {
         db.exec(`ALTER TABLE runs ADD COLUMN cpuSystemMs INTEGER NOT NULL DEFAULT 0`);
     }
+    // Токены LLM добавлены позже (self-hosted-llm-capacity) — тот же аддитивный
+    // приём, что и CPU-поля выше. У строк, записанных до миграции, значение 0.
+    if (!columnNames.has("inputTokens")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN inputTokens INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!columnNames.has("outputTokens")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN outputTokens INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!columnNames.has("totalTokens")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN totalTokens INTEGER NOT NULL DEFAULT 0`);
+    }
     initializedDbs.add(dbPath);
 }
 
@@ -81,6 +95,9 @@ export function insertRun(
         llmCalls: number;
         cpuUserMs: number;
         cpuSystemMs: number;
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens: number;
     },
 ): void {
     const dbPath = tasksDbPath(agentId);
@@ -88,8 +105,8 @@ export function insertRun(
     try {
         ensureTable(db, dbPath);
         db.prepare(`
-            INSERT INTO runs (agentId, type, startedAt, durationMs, status, error, llmCalls, cpuUserMs, cpuSystemMs, createdAt)
-            VALUES (@agentId, @type, @startedAt, @durationMs, @status, @error, @llmCalls, @cpuUserMs, @cpuSystemMs, @createdAt)
+            INSERT INTO runs (agentId, type, startedAt, durationMs, status, error, llmCalls, cpuUserMs, cpuSystemMs, inputTokens, outputTokens, totalTokens, createdAt)
+            VALUES (@agentId, @type, @startedAt, @durationMs, @status, @error, @llmCalls, @cpuUserMs, @cpuSystemMs, @inputTokens, @outputTokens, @totalTokens, @createdAt)
         `).run({
             agentId,
             type: row.type,
@@ -100,6 +117,9 @@ export function insertRun(
             llmCalls: row.llmCalls,
             cpuUserMs: row.cpuUserMs,
             cpuSystemMs: row.cpuSystemMs,
+            inputTokens: row.inputTokens,
+            outputTokens: row.outputTokens,
+            totalTokens: row.totalTokens,
             createdAt: Math.floor(Date.now() / 1000),
         });
     } finally {
@@ -119,7 +139,7 @@ export function getRunsBetween(agentId: string, startSec: number, endSec: number
     try {
         ensureTable(db, dbPath);
         return db.prepare(`
-            SELECT agentId, type, startedAt, durationMs, status, error, llmCalls, cpuUserMs, cpuSystemMs
+            SELECT agentId, type, startedAt, durationMs, status, error, llmCalls, cpuUserMs, cpuSystemMs, inputTokens, outputTokens, totalTokens
             FROM runs
             WHERE startedAt >= @startSec AND startedAt < @endSec
             ORDER BY startedAt ASC

@@ -57,6 +57,8 @@
 |---|---|
 | `~/.openclaw/workspace-<agentId>/` | данные агента |
 | `~/.openclaw/personas/<personName>/` | общие шаблоны персон (`SOUL.md` и др.) — см. ниже |
+| `~/.openclaw/account-defaults/` | общая заготовка учётных данных (`apiId`/`apiHash`/`2fa`), вынесены из персоны — читает только фаза 1 (tg-agent-pool-provision), см. [configuration.md](configuration.md) |
+| `~/.openclaw/tg-agent-pool-provisioning/staging/emptyAccount<K>/` | стейджинг продюсера пула (фаза 1) до промоушена в `workspace-emptyAccount<K>` |
 | `~/.openclaw/codex-auth/` | OAuth-токен ChatGPT (`auth.json`) — primary LLM (codex-подписка), см. [configuration.md](configuration.md) |
 | `~/.openclaw/secrets.env` | секреты сервисов, включая `DEEPSEEK_API_KEY` (fallback LLM) |
 
@@ -87,16 +89,25 @@
 В Saved Messages `REPORT_AGENT_ID`, помимо ежедневной сводки и воронки, приходят
 итоговые отчёты операторских прогонов, запускаемых отсоединённо (`systemd-run` поверх
 ops-скрипта, отчёт по завершении шлётся туда же через `sendSavedMessage`):
-- массовая автрегистрация (`tg-agent-autoregistration`) — per-account статус;
+- подготовка пул-аккаунтов, фаза 1 (`tg-agent-pool-provision`) — per-account статус
+  `done`/`proxy_failed`/`setup_failed`/`needs_manual_code`;
+- развёртывание агентов под персону из пула, фаза 2 (`tg-agent-persona-deploy`) —
+  per-account `done`/`setup_failed`/`account_invalid` + итог «запрошено M, создано X»;
+- массовая автрегистрация (`tg-agent-autoregistration`, **DEPRECATED** — заменена
+  фазами 1+2) — per-account статус;
 - реавторизация через tdata (`tg-agent-reauth-from-tdata`) — терминальный статус прогона;
 - персональные инвайт-ссылки (`private-invite-links`) — сводка по режиму.
 
 Пути формируются в `src/core/config.ts`. Список рабочих агентов (за исключением
 `REPORT_AGENT_ID`) определяется по каталогам `workspace-agent<N>` (`listAgentIds`).
 Каталоги пула пустых аккаунтов `workspace-emptyAccount<N>` (авторизованная сессия +
-`tdata/`) в этот список не входят — они невидимы рабочему контуру и перечисляются
-отдельно (`listPoolAccountIds`), потребляются свипом авто-замены
-(banned-account-replacement); карантин невалидного пул-аккаунта — суффикс `.invalid`.
+`tdata/`, без персоны и username) в этот список не входят — они невидимы рабочему
+контуру и перечисляются отдельно (`listPoolAccountIds`/`listPoolAccountsOldestFirst`).
+Пул **производит** фаза 1 (`tg-agent-pool-provision`) и **потребляют** два процесса:
+развёртывание персоны фаза 2 (`tg-agent-persona-deploy`) и свип авто-замены
+(banned-account-replacement) — оба берут старейший пригодный аккаунт атомарным
+забором. Карантин невалидного пул-аккаунта — суффикс `.invalid`; транзиентный каталог
+нового агента при промоушене фазы 2 — `workspace-agent<N>.incoming` (тоже невидим).
 
 ### Персона `~/.openclaw/personas/<personName>/`
 

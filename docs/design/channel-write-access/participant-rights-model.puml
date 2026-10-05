@@ -1,0 +1,253 @@
+@startuml participant-rights-model
+!pragma layout smetana
+title Telegram TL-схема: Chat / участники / права (домен «право писать»)
+
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor White
+  BorderColor Black
+  ArrowColor Black
+}
+legend top left
+  Источник: официальная TL-схема Telegram (сверено по node_modules/telegram/tl/apiTl.js).
+  Нотация полей: как в TL — `имя : Тип`; `?` = поле опционально (присутствует по флагу);
+  тип `true` = булев флаг (истина, если присутствует). Композиция (*--) = вложенный объект;
+  наследование (<|--) = конструктор абстрактного TL-типа. Мультипликаторы «0..1»/«1» —
+  опциональность вложенного объекта по флагу.
+end legend
+
+' ═══════════ ТИП: Chat (контейнер) ═══════════
+abstract class Chat <<TL type>>
+
+class chatEmpty <<#29562865>> {
+  id : long
+}
+
+class chat <<basic group #41cbf256>> {
+  creator : true?
+  left : true?
+  deactivated : true?
+  call_active : true?
+  call_not_empty : true?
+  noforwards : true?
+  id : long
+  title : string
+  photo : ChatPhoto
+  participants_count : int
+  date : int
+  version : int
+  migrated_to : InputChannel?
+}
+
+class chatForbidden <<нет доступа #6592a1a7>> {
+  id : long
+  title : string
+}
+
+class channel <<канал/супергруппа #e00998b7>> {
+  creator : true?
+  left : true?
+  broadcast : true?
+  verified : true?
+  megagroup : true?
+  restricted : true?
+  signatures : true?
+  min : true?
+  scam : true?
+  has_link : true?
+  has_geo : true?
+  slowmode_enabled : true?
+  call_active : true?
+  call_not_empty : true?
+  fake : true?
+  gigagroup : true?
+  noforwards : true?
+  join_to_send : true?
+  join_request : true?
+  forum : true?
+  stories_hidden : true?
+  stories_hidden_min : true?
+  stories_unavailable : true?
+  signature_profiles : true?
+  id : long
+  access_hash : long?
+  title : string
+  username : string?
+  photo : ChatPhoto
+  date : int
+  restriction_reason : Vector<RestrictionReason>?
+  participants_count : int?
+  usernames : Vector<Username>?
+  stories_max_id : int?
+  color : PeerColor?
+  profile_color : PeerColor?
+  emoji_status : EmojiStatus?
+  level : int?
+  subscription_until_date : int?
+  bot_verification_icon : long?
+}
+
+class channelForbidden <<нет доступа #17d493d5>> {
+  broadcast : true?
+  megagroup : true?
+  id : long
+  access_hash : long
+  title : string
+  until_date : int?
+}
+
+Chat <|-- chatEmpty
+Chat <|-- chat
+Chat <|-- chatForbidden
+Chat <|-- channel
+Chat <|-- channelForbidden
+
+' ═══════════ ТИП: ChannelParticipant (наш статус в канале/супергруппе) ═══════════
+abstract class ChannelParticipant <<TL type>>
+
+class channelParticipant <<#cb397619>> {
+  user_id : long
+  date : int
+  subscription_until_date : int?
+}
+class channelParticipantSelf <<#4f607bef>> {
+  via_request : true?
+  user_id : long
+  inviter_id : long
+  date : int
+  subscription_until_date : int?
+}
+class channelParticipantCreator <<#2fe601d3>> {
+  user_id : long
+  rank : string?
+}
+class channelParticipantAdmin <<#34c3bb53>> {
+  can_edit : true?
+  self : true?
+  user_id : long
+  inviter_id : long?
+  promoted_by : long
+  date : int
+  rank : string?
+}
+class channelParticipantBanned <<#6df8014e>> {
+  left : true?
+  kicked_by : long
+  date : int
+}
+class channelParticipantLeft <<#1b03f006>>
+
+ChannelParticipant <|-- channelParticipant
+ChannelParticipant <|-- channelParticipantSelf
+ChannelParticipant <|-- channelParticipantCreator
+ChannelParticipant <|-- channelParticipantAdmin
+ChannelParticipant <|-- channelParticipantBanned
+ChannelParticipant <|-- channelParticipantLeft
+
+' ═══════════ ТИП: ChatParticipant (наш статус в базовой группе) ═══════════
+abstract class ChatParticipant <<TL type>>
+
+class chatParticipant <<#c02d4007>> {
+  user_id : long
+  inviter_id : long
+  date : int
+}
+class chatParticipantCreator <<#e46bcee4>> {
+  user_id : long
+}
+class chatParticipantAdmin <<#a0933f5b>> {
+  user_id : long
+  inviter_id : long
+  date : int
+}
+
+ChatParticipant <|-- chatParticipant
+ChatParticipant <|-- chatParticipantCreator
+ChatParticipant <|-- chatParticipantAdmin
+
+' ═══════════ Наборы прав (value objects) ═══════════
+class ChatBannedRights <<#9f120418 — true = ЗАПРЕЩЕНО>> {
+  view_messages : true?
+  send_messages : true?
+  send_media : true?
+  send_stickers : true?
+  send_gifs : true?
+  send_games : true?
+  send_inline : true?
+  embed_links : true?
+  send_polls : true?
+  change_info : true?
+  invite_users : true?
+  pin_messages : true?
+  manage_topics : true?
+  send_photos : true?
+  send_videos : true?
+  send_roundvideos : true?
+  send_audios : true?
+  send_voices : true?
+  send_docs : true?
+  send_plain : true?
+  until_date : int
+}
+
+class ChatAdminRights <<#5fb224d5 — true = РАЗРЕШЕНО>> {
+  change_info : true?
+  post_messages : true?
+  edit_messages : true?
+  delete_messages : true?
+  ban_users : true?
+  invite_users : true?
+  pin_messages : true?
+  add_admins : true?
+  anonymous : true?
+  manage_call : true?
+  other : true?
+  manage_topics : true?
+  post_stories : true?
+  edit_stories : true?
+  delete_stories : true?
+}
+
+' ═══════════ ТИП: Peer (ссылка в Banned/Left) ═══════════
+abstract class Peer <<TL type>>
+class peerUser <<#59511722>> {
+  user_id : long
+}
+class peerChat <<#36c6019a>> {
+  chat_id : long
+}
+class peerChannel <<#a2a5371e>> {
+  channel_id : long
+}
+Peer <|-- peerUser
+Peer <|-- peerChat
+Peer <|-- peerChannel
+
+' ═══════════ Композиция: где лежат права ═══════════
+chat "1" *-- "0..1" ChatAdminRights : admin_rights
+chat "1" *-- "0..1" ChatBannedRights : default_banned_rights
+channel "1" *-- "0..1" ChatAdminRights : admin_rights
+channel "1" *-- "0..1" ChatBannedRights : banned_rights
+channel "1" *-- "0..1" ChatBannedRights : default_banned_rights
+channelParticipantCreator "1" *-- "1" ChatAdminRights : admin_rights
+channelParticipantAdmin "1" *-- "1" ChatAdminRights : admin_rights
+channelParticipantBanned "1" *-- "1" ChatBannedRights : banned_rights
+channelParticipantBanned "1" --> "1" Peer : peer
+channelParticipantLeft "1" --> "1" Peer : peer
+
+' ═══════════ Наш домен (НЕ часть TL-схемы) ═══════════
+note as N1
+  <b>Наш домен «право писать» (не схема, action-модель):</b>
+  Перед отправкой: снимок статусов -> classifyWriteAccess -> действие.
+  Уровень КАНАЛА (авторотация не поможет):
+   • channel.restricted / default_banned_rights.send_messages -> suspend (беcсрочно)
+   • channel.slowmode_enabled -> suspend временный
+  Уровень АККАУНТА (другой аккаунт может сработать):
+   • channel.left / chatForbidden / channelForbidden / CHANNEL_PRIVATE -> авторотация
+   • ChannelParticipantBanned / ChannelParticipantLeft -> авторотация
+  Вступительный ценз: join_to_send -> вступление; join_request -> заявка + авторотация.
+  send_messages в ChatBannedRights инвертирован (true = ЗАПРЕЩЕНО).
+end note
+N1 .. ChatBannedRights
+
+@enduml

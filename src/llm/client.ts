@@ -1,11 +1,8 @@
-import * as path from "path";
-import * as os from "os";
 import { generateText, generateObject } from "ai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
-import { createOpenAIOAuth } from "@openai-oauth/ai-sdk";
-import { openaiCredentials } from "@openai-oauth/local";
-import { createFallback } from "ai-fallback";
 import { ZodError, type ZodType } from "zod";
+import { withFailover } from "./failover";
+import { classifyLlmError, isFailoverClass, LlmCallError } from "./error-class";
 
 export interface LlmCompleteOptions {
     /**
@@ -21,6 +18,15 @@ export interface LlmCompleteOptions {
     prompt: string;
 }
 
+export interface LlmTokenUsage {
+    /** Входные (prompt) токены, суммарно за время жизни клиента. */
+    inputTokens: number;
+    /** Выходные (completion) токены, суммарно за время жизни клиента. */
+    outputTokens: number;
+    /** Суммарные токены (input+output, по данным провайдера). */
+    totalTokens: number;
+}
+
 export interface LlmClient {
     /**
      * Счётчик фактических запросов к модели за время жизни клиента. Инкремент на
@@ -30,6 +36,14 @@ export interface LlmClient {
      * логических вызовов `complete`/`completeObject`).
      */
     readonly requestCount: number;
+    /**
+     * Накопленный расход токенов за время жизни клиента (тот же принцип, что и
+     * `requestCount`: суммируется по каждому round-trip к модели, включая ретраи
+     * `completeObject`). Диспетчер снимает срез вокруг скилла для записи в `runs`.
+     * Провайдер может не вернуть часть полей (`undefined` в `ai-sdk`) — тогда в
+     * сумму идёт 0, поэтому значение является нижней оценкой фактического расхода.
+     */
+    readonly tokenUsage: LlmTokenUsage;
     /** Генерация свободного текста (ответы, DM). */
     complete(opts: LlmCompleteOptions): Promise<string>;
     /**
@@ -113,115 +127,126 @@ export function createLlmClient(): LlmClient {
         );
     }
 
-    // Primary — ChatGPT-подписка через codex (@openai-oauth/ai-sdk шлёт корректный
-    // originator). Токен — общий ~/.openclaw/codex-auth/auth.json, рефреш делает
-    // библиотека. Fallback — DeepSeek. Персона доезжает через `system` (маппинг в
-    // codex instructions — на стороне библиотеки).
-    const codexAuthFile = path.join(os.homedir(), ".openclaw", "codex-auth", "auth.json");
-    const codex = createOpenAIOAuth(openaiCredentials({ authFilePath: codexAuthFile }));
+    // Primary — пул codex-слотов (llm/codex-pool.ts); fallback — DeepSeek последним звеном.
+    // Цепочку провайдеров и поклассовое переключение ведёт withFailover (llm/failover.ts):
+    // переход к следующему codex-слоту только при usage_limit, повтор на том же при 401,
+    // прочие классы — без повтора. DeepSeek обязателен (§9-E) — ключ проверен выше.
     const deepseek = createDeepSeek({ apiKey });
-
-    // Любая ошибка primary (codex) → fallback на DeepSeek. Срабатывание логируется
-    // (journald), чтобы отказ codex и переход на платный DeepSeek не были тихими.
-    const model = createFallback({
-        models: [codex("gpt-5.6-sol"), deepseek("deepseek-flash")],
-        shouldRetryThisError: () => true,
-        onError: (error, modelId) => {
-            console.warn(
-                `[llm] fallback: модель "${modelId}" упала (${error?.message ?? error}) — переключение на следующую`,
-            );
-        },
-    });
+    const deepseekModel = deepseek("deepseek-flash");
 
     // Счётчик фактических запросов к модели (R: «запросов к LLM» в отчёте). Каждый
     // round-trip оборачивается genText/genObject, поэтому ретраи completeObject
-    // учитываются честно.
+    // учитываются честно. Расход токенов аккумулируется в той же точке — из
+    // `result.usage` (ai@6: inputTokens/outputTokens/totalTokens, каждое может
+    // быть undefined, если провайдер его не вернул → в сумму идёт 0).
     let requestCount = 0;
-    const genText: typeof generateText = (opts: any) => {
-        requestCount += 1;
-        return generateText(opts);
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let totalTokens = 0;
+    const addUsage = (usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined): void => {
+        if (!usage) return;
+        inputTokens += usage.inputTokens ?? 0;
+        outputTokens += usage.outputTokens ?? 0;
+        totalTokens += usage.totalTokens ?? 0;
     };
-    const genObject: typeof generateObject = (opts: any) => {
+    const genText: typeof generateText = (async (opts: any) => {
         requestCount += 1;
-        return generateObject(opts);
-    };
+        const result = await generateText(opts);
+        addUsage(result.usage);
+        return result;
+    }) as typeof generateText;
+    const genObject: typeof generateObject = (async (opts: any) => {
+        requestCount += 1;
+        const result = await generateObject(opts);
+        addUsage(result.usage);
+        return result;
+    }) as typeof generateObject;
 
     return {
         get requestCount() {
             return requestCount;
         },
 
+        get tokenUsage() {
+            return { inputTokens, outputTokens, totalTokens };
+        },
+
         async complete({ system, prompt }) {
-            const { text } = await genText({ model, system, prompt });
-            return text;
+            return withFailover(deepseekModel, async (model) => {
+                const { text } = await genText({ model, system, prompt });
+                return text;
+            });
         },
 
         async completeObject<T>({ system, prompt }: LlmCompleteOptions, schema?: ZodType<T>): Promise<T> {
-            // Без схемы валидировать нечего — свободный JSON одним проходом.
+            // Без схемы — свободный JSON одним проходом (на каждом провайдере цепочки).
             if (!schema) {
-                const { text } = await genText({ model, system, prompt });
-                return extractJson(text) as T;
+                return withFailover(deepseekModel, async (model) => {
+                    const { text } = await genText({ model, system, prompt });
+                    return extractJson(text) as T;
+                });
             }
 
-            // ── Слой 1: нативный structured output (приоритет). ──────────────
-            // generateObject транслирует zod-схему в text.format json_schema
-            // Responses API → декодер модели конструктивно ограничен схемой, типы
-            // гарантированы. Если бэкенд/модель его не поддерживает — бросает, и мы
-            // спускаемся на текстовый путь. Сетевые/авторизационные ошибки тоже
-            // приведут сюда — текстовый путь честно повторит запрос и пробросит их.
-            try {
-                const { object } = await genObject({ model, system, prompt, schema });
-                return object;
-            } catch {
-                // structured output недоступен — fallback ниже
-            }
-
-            // ── Слой 2: текстовая генерация + фидбэк-ретрай. ─────────────────
-            // 1-й проход — обычный текст; при ошибке схемы 2-й проход повторяет
-            // запрос, подложив модели конкретные zod-ошибки (путь + ожидаемый тип),
-            // чтобы она прицельно исправила, а не «верни валидный JSON» вслепую.
-            let lastText = "";
-            let lastError: unknown;
-            for (let attempt = 1; attempt <= 2; attempt++) {
-                let feedback = "";
-                if (attempt === 2 && lastError instanceof ZodError) {
-                    const issues = lastError.issues
-                        .map((i) => {
-                            const field = i.path.length ? `поле "${i.path.join(".")}"` : "корень";
-                            const exp = (i as ZodIssueLike).expected;
-                            return exp ? `${field}: ожидается ${exp}` : `${field}: ${i.message}`;
-                        })
-                        .join("; ");
-                    feedback =
-                        `\n\nПрошлый ответ не прошёл валидацию: ${issues}. ` +
-                        "Верни ТОЛЬКО валидный JSON с правильными типами — без markdown-ограждения, без пояснений.";
-                }
-                const { text } = await genText({ model, system, prompt: prompt + feedback });
-                lastText = text;
+            // Пайплайн схемы исполняется для ОДНОГО провайдера внутри run(model).
+            // Провайдерные классы ошибок (usage_limit/auth_401/auth_403/transient)
+            // пробрасываются наружу в withFailover; схемные/прочие — деградируют на
+            // текстовый путь ТОГО ЖЕ провайдера (а не роняют failover).
+            return withFailover(deepseekModel, async (model): Promise<T> => {
+                // ── Слой 1: нативный structured output. ──────────────────────
+                // generateObject транслирует zod-схему в json_schema (strict) → типы
+                // гарантированы. Провайдерную ошибку бросаем наружу (в failover),
+                // схемную/прочую — деградируем ниже на текст (НЕ глотаем молча).
                 try {
-                    return schema.parse(extractJson(text));
+                    const { object } = await genObject({ model, system, prompt, schema });
+                    return object as T;
                 } catch (err) {
-                    lastError = err;
+                    if (isFailoverClass(classifyLlmError(err))) throw err;
                 }
-            }
 
-            // ── Слой 3: тихое приведение типов (крайняя мера). ──────────────
-            // По zod-ошибкам последнего ответа точечно приводим типы проблемных
-            // полей в распарсенном JSON и валидируем снова. Срабатывает только на
-            // invalid_type — структурные ошибки (отсутствие поля и т.п.) не маскирует.
-            if (lastError instanceof ZodError) {
-                try {
-                    const coerced = applyCoercions(extractJson(lastText), lastError.issues as ZodIssueLike[]);
-                    return schema.parse(coerced);
-                } catch (err) {
-                    lastError = err;
+                // ── Слой 2: текст + фидбэк-ретрай. ───────────────────────────
+                // Провайдерная ошибка genText всплывёт наружу в failover сама.
+                let lastText = "";
+                let lastError: unknown;
+                for (let attempt = 1; attempt <= 2; attempt++) {
+                    let feedback = "";
+                    if (attempt === 2 && lastError instanceof ZodError) {
+                        const issues = lastError.issues
+                            .map((i) => {
+                                const field = i.path.length ? `поле "${i.path.join(".")}"` : "корень";
+                                const exp = (i as ZodIssueLike).expected;
+                                return exp ? `${field}: ожидается ${exp}` : `${field}: ${i.message}`;
+                            })
+                            .join("; ");
+                        feedback =
+                            `\n\nПрошлый ответ не прошёл валидацию: ${issues}. ` +
+                            "Верни ТОЛЬКО валидный JSON с правильными типами — без markdown-ограждения, без пояснений.";
+                    }
+                    const { text } = await genText({ model, system, prompt: prompt + feedback });
+                    lastText = text;
+                    try {
+                        return schema.parse(extractJson(text));
+                    } catch (err) {
+                        lastError = err;
+                    }
                 }
-            }
 
-            const detail = lastError instanceof Error ? lastError.message : String(lastError);
-            throw new Error(
-                `completeObject: валидный JSON не получен (structured output → фидбэк-ретрай → coerce исчерпаны): ${detail}`,
-            );
+                // ── Слой 3: тихое приведение типов (крайняя мера). ───────────
+                if (lastError instanceof ZodError) {
+                    try {
+                        const coerced = applyCoercions(extractJson(lastText), lastError.issues as ZodIssueLike[]);
+                        return schema.parse(coerced);
+                    } catch (err) {
+                        lastError = err;
+                    }
+                }
+
+                const detail = lastError instanceof Error ? lastError.message : String(lastError);
+                throw new LlmCallError(
+                    "schema_error",
+                    `completeObject: валидный JSON не получен (structured output → фидбэк-ретрай → coerce исчерпаны): ${detail}`,
+                    { cause: lastError },
+                );
+            });
         },
     };
 }

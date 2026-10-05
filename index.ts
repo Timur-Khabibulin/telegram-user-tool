@@ -16,7 +16,7 @@ import { Type } from "@sinclair/typebox";
 import type { Logger } from "./src/core/logger";
 import { TelegramService } from "./src/core/telegram/service";
 import type { ProxyConfig } from "./src/core/config";
-import { FUNNEL_ADMIN_AGENT_ID, FUNNEL_PRIVATE_CHANNEL_ID, REPORT_AGENT_ID, listAgentIds, reportsDir } from "./src/core/config";
+import { FUNNEL_ADMIN_AGENT_ID, REPORT_AGENT_ID, listAgentIds, reportsDir } from "./src/core/config";
 import { runDiscovery, renderReport } from "./src/features/discovery/run";
 import { runChannelAnalysis, renderStats } from "./src/features/channel-analysis/run";
 import { runChannelContextForAgent, renderChannelContextStats } from "./src/features/channel-context/run";
@@ -72,6 +72,8 @@ import { getAllChannelsWithAvgViews } from "./src/core/db/channels";
 import { runChannelCleanup, type ChannelCleanupParams } from "./src/skills/channel-cleanup";
 import { runAutoregistration, retryManualCode, renderReport as renderAutoregistrationReport } from "./src/features/tg-agent-autoregistration/run";
 import { runChannelSetup, renderChannelSetupReport } from "./src/features/tg-agent-channel-setup/run";
+import { runPoolProvision, retryPoolManualCode, renderReport as renderPoolProvisionReport } from "./src/features/tg-agent-pool-provision/run";
+import { runPersonaDeploy, renderReport as renderPersonaDeployReport } from "./src/features/tg-agent-persona-deploy/run";
 import { reauthFromTdata } from "./src/features/tg-agent-reauth-from-tdata/run";
 
 // ─── OpenClaw result helpers ──────────────────────────────────────────
@@ -1145,7 +1147,8 @@ export default definePluginEntry({
         // Собирает метрики через MTProto + per-agent БД, считает дельту
         // относительно последнего сохранённого снапшота и НЕ пишет постоянный
         // снапшот (persist=false) — не задевает таймерный дневной ряд.
-        // adminAgentId/privateChannelId берутся из окружения гейтвея.
+        // adminAgentId берётся из окружения гейтвея; приватный канал воронки
+        // резолвится per-persona внутри collectFunnel (per-persona-funnel-channel).
         reg({
             name: "tg_funnel_report",
             description:
@@ -1165,7 +1168,6 @@ export default definePluginEntry({
                             window: currentDayWindow(),
                             persist: false,
                             adminAgentId: FUNNEL_ADMIN_AGENT_ID,
-                            privateChannelId: FUNNEL_PRIVATE_CHANNEL_ID,
                         },
                         log,
                     );
@@ -1370,6 +1372,7 @@ export default definePluginEntry({
         reg({
             name: "tg_agent_autoregistration_run",
             description:
+                "[DEPRECATED — используйте tg_agent_pool_provision_run (фаза 1) + tg_agent_persona_deploy_run (фаза 2)]. " +
                 "Массовая автоматическая регистрация Telegram-агентов из готовых tdata-сессий. " +
                 "Ссылки на архивы (links) — Mega folder-share или Google Drive file-ссылка, по одной на " +
                 "аккаунт; вид источника определяется автоматически. Текущий 2FA-пароль пачки задаётся " +
@@ -1402,6 +1405,7 @@ export default definePluginEntry({
         reg({
             name: "tg_agent_autoregistration_retry_code",
             description:
+                "[DEPRECATED — используйте tg_agent_pool_provision_retry_code]. " +
                 "Повторяет только регистрацию второй (агентской) MTProto-сессии для аккаунта, " +
                 "застрявшего в статусе needs_manual_code после tg_agent_autoregistration_run — " +
                 "БЕЗ повторной подготовки аккаунта (2FA/сессии/профиль/канал уже применены, " +
@@ -1426,6 +1430,7 @@ export default definePluginEntry({
         reg({
             name: "tg_agent_channel_setup",
             description:
+                "[DEPRECATED — поглощается фазой 2 tg_agent_persona_deploy_run]. " +
                 "Создаёт публичный канал персоны для УЖЕ зарегистрированных агентов (batch). " +
                 "Для каждого agentId подключается через сохранённую сессию агента, читает персону " +
                 "и username из его tg-account.json, создаёт публичный канал и закрепляет его в " +
@@ -1439,6 +1444,82 @@ export default definePluginEntry({
                 run("tg_agent_channel_setup", async () => {
                     const report = await runChannelSetup(params.agentIds, log);
                     return { text: renderChannelSetupReport(report), results: report.results };
+                }),
+        });
+
+        // ── tg_agent_pool_provision_run (фаза 1 — продюсер пула) ─────────
+
+        reg({
+            name: "tg_agent_pool_provision_run",
+            description:
+                "Фаза 1: из готовых tdata-сессий делает обезличенные пул-аккаунты " +
+                "workspace-emptyAccount<K> (запас впрок). Ссылки (links) — Mega folder-share или " +
+                "Google Drive file-ссылка, по одной на аккаунт. Подбирает мобильный прокси, " +
+                "восстанавливает bootstrap-сессию из tdata, делает гигиену БЕЗ персоны (удаляет " +
+                "унаследованные публичные каналы, меняет 2FA на общий, сбрасывает чужие сессии), " +
+                "регистрирует вторую MTProto-сессию. Персона/профиль/username/канал НЕ применяются " +
+                "(это фаза 2 — tg_agent_persona_deploy_run). Для длинных пачек запускать detached " +
+                "через ops-скрипт (см. skills/tg-agent-pool-provision). Статус по каждому: " +
+                "done / proxy_failed / setup_failed / needs_manual_code.",
+            parameters: Type.Object({
+                links: Type.Array(Type.String(), { description: "Ссылки на tdata-архивы (Mega folder-share или Google Drive file-ссылка), одна на аккаунт" }),
+                twoFaPassword: Type.Optional(Type.String({ description: "Текущий 2FA-пароль аккаунтов пачки (один на весь прогон). Не передавать, если 2FA на аккаунтах пачки нет. Взаимоисключающ с twoFaPasswordFile" })),
+                twoFaPasswordFile: Type.Optional(Type.String({ description: "Имя файла в скачанном архиве с текущим 2FA-паролем (например password.txt) — читается пер-аккаунт. Взаимоисключающ с twoFaPassword" })),
+                proxyRegion: Type.String({ description: "Регион мобильного прокси для asocks" }),
+                maxProxyAttempts: Type.Number({ description: "Максимум попыток подбора прокси на аккаунт" }),
+            }),
+            execute: (
+                _id: string,
+                params: { links: string[]; twoFaPassword?: string; twoFaPasswordFile?: string; proxyRegion: string; maxProxyAttempts: number },
+            ) =>
+                run("tg_agent_pool_provision_run", async () => {
+                    const report = await runPoolProvision(params, log);
+                    return { text: renderPoolProvisionReport(report), results: report.results, abortReason: report.abortReason };
+                }),
+        });
+
+        // ── tg_agent_pool_provision_retry_code ──────────────────────────
+
+        reg({
+            name: "tg_agent_pool_provision_retry_code",
+            description:
+                "Повторяет только регистрацию второй (агентской) сессии для пул-аккаунта, застрявшего " +
+                "в статусе needs_manual_code после tg_agent_pool_provision_run — БЕЗ повторной гигиены " +
+                "(2FA/сессии/каналы уже применены). Требует, чтобы запись в стейджинге всё ещё была needs_manual_code.",
+            parameters: Type.Object({
+                poolId: Type.String({ description: "id пул-аккаунта в стейджинге, например emptyAccount12" }),
+                proxyRegion: Type.String({ description: "Регион мобильного прокси для asocks" }),
+                maxProxyAttempts: Type.Number({ description: "Максимум попыток подбора прокси" }),
+            }),
+            execute: (
+                _id: string,
+                params: { poolId: string; proxyRegion: string; maxProxyAttempts: number },
+            ) =>
+                run("tg_agent_pool_provision_retry_code", () =>
+                    retryPoolManualCode(params.poolId, params.proxyRegion, params.maxProxyAttempts, log),
+                ),
+        });
+
+        // ── tg_agent_persona_deploy_run (фаза 2 — потребитель пула) ──────
+
+        reg({
+            name: "tg_agent_persona_deploy_run",
+            description:
+                "Фаза 2: превращает count обезличенных пул-аккаунтов (старейших) в рабочих агентов " +
+                "workspace-agent<N> под выбранную персону. Через сессию каждого пул-аккаунта задаёт " +
+                "username/профиль/фото, создаёт публичный канал персоны с постом и закрепом, вставляет " +
+                "инвайт-ссылку в общий приватный канал воронки. Невалидные пул-аккаунты пропускаются " +
+                "(account_invalid, карантин), добор до count из следующих. Частичный успех при нехватке " +
+                "пула — сообщается в отчёте. Параллельные прогоны безопасны. Статус по каждому: " +
+                "done / setup_failed / account_invalid.",
+            parameters: Type.Object({
+                personName: Type.String({ description: "Имя персоны — шаблон в ~/.openclaw/personas/<personName>/" }),
+                count: Type.Number({ description: "Сколько агентов создать (M)" }),
+            }),
+            execute: (_id: string, params: { personName: string; count: number }) =>
+                run("tg_agent_persona_deploy_run", async () => {
+                    const report = await runPersonaDeploy(params, log);
+                    return { text: renderPersonaDeployReport(report), results: report.results, abortReason: report.abortReason };
                 }),
         });
 

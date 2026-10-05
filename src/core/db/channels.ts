@@ -10,7 +10,6 @@ import Database from "better-sqlite3";
 import { channelsDbPath, CHANNEL_CHECK_PERIOD_SECONDS, FUNNEL_ADMIN_AGENT_ID } from "../config";
 import type { Logger } from "../logger";
 import type { ChannelIdentity } from "../telegram/service";
-import type { WriteAccessReason } from "../write-access";
 import { recordStatusChange, recordJoined, type OperationSource } from "./channel-operations";
 import { normalizeChannelLink } from "./discovery";
 import {
@@ -50,7 +49,7 @@ interface ChannelRow {
      * Постоянная (`isPermanentReason`) гейтит фазу отправок монитора без живого
      * `GetParticipant`; переменная сюда пишется вместе со `status='banned'`.
      */
-    write_access_reason: WriteAccessReason | null;
+    write_access_reason: string | null;
 }
 
 export interface ClassifyInputMessage {
@@ -161,10 +160,6 @@ export function initChannels(agentId: string, log: Logger): { ok: true } {
             );
             CREATE INDEX IF NOT EXISTS idx_lastProcessedAt
                 ON channels(lastProcessedAt ASC);
-            CREATE TABLE IF NOT EXISTS sync_state (
-                id             INTEGER PRIMARY KEY CHECK (id = 1),
-                lastFullSyncAt INTEGER NOT NULL DEFAULT 0
-            );
         `);
         migrateChannelIdentityColumns(db);
         migrateCoverageColumns(db);
@@ -174,6 +169,7 @@ export function initChannels(agentId: string, log: Logger): { ok: true } {
         migrateChannelContextColumns(db);
         migrateActivityColumns(db);
         migrateWriteAccessColumns(db);
+        migratePeerIdentityColumns(db);
         log.info(`[tg-channels-db] tg_channels_init — done`);
         return { ok: true };
     } finally {
@@ -333,57 +329,85 @@ function migrateWriteAccessColumns(db: Database.Database): void {
 }
 
 /**
- * Пишет причину «писать нельзя» (channel-write-access) и справочный `until`
- * (только для `account_muted`; для прочих причин передаётся null). Признак
- * хранится отдельно от `status` — простановка `status='banned'` (переменная
- * причина, вход в ротацию) делается вызывающим отдельно. `initChannels` не
- * вызывается: функция работает по существующей строке канала.
+ * Аддитивная миграция колонок модели идентичности peer (tg-peer-identity-model,
+ * Вариант A). Добавляет:
+ * - `peer_type` — `broadcast`/`megagroup`/`basic_group`; определяет, нужен ли
+ *   access_hash. Бэкафилл из вида `chatId`: `-100…` ⇒ `megagroup`, иначе
+ *   `basic_group` (точный broadcast/megagroup доберётся первым живым резолвом).
+ * - `chat_access_hash_updated_at` / `channel_access_hash_updated_at` — провенанс
+ *   уже хранимых `chatAccessHash`/`channelAccessHash`. При миграции NULL ⇒
+ *   унаследованный хэш невалиден (нет отметки — считаем полученным до текущей
+ *   авторизации) и переполучается на первом обращении.
+ * - `membership` (`member`/`left`/`banned`/`not_found`) — целевой дом факта
+ *   членства; популируется из `status` (dual-write держит согласованность дальше,
+ *   см. `markMembership`). `should_leave`/`suspend`/`format_error`/`only_comment`/
+ *   `sleep`/NULL ⇒ `member` (агент ещё в чате).
+ * - `membership_updated_at` — из `statusUpdatedAt` только для членских статусов.
+ * - `migrated_to_id` — «надгробие» basic group, мигрировавшей в супергруппу (R6).
+ * Бэкафилл идемпотентен (обновляет только строки, где поле ещё NULL).
  */
-export function setWriteAccessReason(
-    agentId: string,
-    chatId: string,
-    reason: WriteAccessReason,
-    log: Logger,
-    until: number | null = null,
-): void {
-    const db = openDb(channelsDbPath(agentId));
-    try {
-        migrateWriteAccessColumns(db);
-        db.prepare(`
-            UPDATE channels
-            SET write_access_reason = @reason, write_access_until = @until
-            WHERE chatId = @chatId
-        `).run({ reason, until, chatId });
-        log.info(`[tg-channels-db] setWriteAccessReason — agentId=${agentId} chatId=${chatId} reason=${reason} until=${until ?? "null"}`);
-    } finally {
-        db.close();
-    }
+function migratePeerIdentityColumns(db: Database.Database): void {
+    const cols = (db.prepare(`PRAGMA table_info(channels)`).all() as { name: string }[]).map((c) => c.name);
+    const add = (name: string, decl: string) => {
+        if (!cols.includes(name)) db.exec(`ALTER TABLE channels ADD COLUMN ${name} ${decl}`);
+    };
+    add("peer_type", "TEXT");
+    add("chat_access_hash_updated_at", "INTEGER");
+    add("channel_access_hash_updated_at", "INTEGER");
+    add("membership", "TEXT");
+    add("membership_updated_at", "INTEGER");
+    add("migrated_to_id", "TEXT");
+
+    // Бэкафилл peer_type из вида marked id (chatId).
+    db.exec(`
+        UPDATE channels
+        SET peer_type = CASE WHEN chatId LIKE '-100%' THEN 'megagroup' ELSE 'basic_group' END
+        WHERE peer_type IS NULL
+    `);
+    // Бэкафилл membership из status (§5.1.1): status при этом НЕ трогаем.
+    db.exec(`
+        UPDATE channels
+        SET membership = CASE
+                WHEN status = 'banned' THEN 'banned'
+                WHEN status = 'not_found' THEN 'not_found'
+                WHEN status IN ('leaved_from_banned', 'leaved_manual') THEN 'left'
+                ELSE 'member'
+            END,
+            membership_updated_at = CASE
+                WHEN status IN ('banned', 'not_found', 'leaved_from_banned', 'leaved_manual') THEN statusUpdatedAt
+                ELSE NULL
+            END
+        WHERE membership IS NULL
+    `);
 }
 
-/**
- * Снимает признак «писать нельзя» (channel-write-access) — живая проверка перед
- * прогоном отправок показала участника без ограничения (AC-10). Сбрасывает и
- * `write_access_until`.
- */
-export function clearWriteAccessReason(agentId: string, chatId: string, log: Logger): void {
-    const db = openDb(channelsDbPath(agentId));
-    try {
-        migrateWriteAccessColumns(db);
-        db.prepare(`
-            UPDATE channels
-            SET write_access_reason = NULL, write_access_until = NULL
-            WHERE chatId = @chatId
-        `).run({ chatId });
-        log.info(`[tg-channels-db] clearWriteAccessReason — agentId=${agentId} chatId=${chatId}`);
-    } finally {
-        db.close();
-    }
-}
+// channel-write-access-proactive: функции записи/снятия признака `write_access_reason`
+// удалены — проактивная модель выражает «писать нельзя» через `status`
+// (`banned`/`suspend`) и журнал операций. Колонки `write_access_reason`/
+// `write_access_until` оставлены мёртвыми (`migrateWriteAccessColumns` в `initChannels`
+// их создаёт, `getChannelsBatch`/`upsertChannelIdentityFromJoin` читают/пишут NULL),
+// дроп — отдельной чисткой.
 
 /** Статусы, которые считаются терминальными (агент сам не участник чата) — channel-not-found-recovery. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
     "banned", "suspend", "leaved_from_banned", "leaved_manual", "should_leave",
 ]);
+
+/**
+ * Членство (tg-peer-identity-model), соответствующее прикладному `status`, для
+ * dual-write в `markChannelStatus`. `null` = статус не несёт факта членства
+ * (`format_error`/`suspend`/`only_comment`/`sleep`/`should_leave`) — `membership`
+ * при нём НЕ меняется. Полное отображение — §5.1.1 architecture.md.
+ */
+function membershipForStatus(status: ChannelStatus): "left" | "banned" | "not_found" | null {
+    switch (status) {
+        case "banned": return "banned";
+        case "not_found": return "not_found";
+        case "leaved_from_banned":
+        case "leaved_manual": return "left";
+        default: return null;
+    }
+}
 
 /**
  * Синхронизирует таблицу channels с актуальными диалогами Telegram.
@@ -430,8 +454,9 @@ export function syncChannels(
             VALUES (@chatId, @title, @chatUsername, 0)
         `);
         const updateStmt = db.prepare(`UPDATE channels SET title = @title, chatUsername = @chatUsername WHERE chatId = @chatId`);
-        const markNotFoundStmt = db.prepare(`UPDATE channels SET status = 'not_found', statusUpdatedAt = strftime('%s','now') WHERE chatId = ?`);
-        const clearNotFoundStmt = db.prepare(`UPDATE channels SET status = NULL, statusUpdatedAt = NULL WHERE chatId = ?`);
+        // dual-write membership (tg-peer-identity-model): пропал из диалогов → not_found; вернулся → member.
+        const markNotFoundStmt = db.prepare(`UPDATE channels SET status = 'not_found', statusUpdatedAt = strftime('%s','now'), membership = 'not_found', membership_updated_at = strftime('%s','now') WHERE chatId = ?`);
+        const clearNotFoundStmt = db.prepare(`UPDATE channels SET status = NULL, statusUpdatedAt = NULL, membership = 'member', membership_updated_at = strftime('%s','now') WHERE chatId = ?`);
 
         db.transaction(() => {
             for (const [chatId, { title, username }] of toAdd) insertStmt.run({ chatId, title, chatUsername: username });
@@ -484,34 +509,31 @@ export function getChannelsBatch(
 }
 
 /**
- * Due ли полная синхронизация списка каналов (monitor-v5-human-pacing-batching):
- * тот же periodSeconds-паттерн, что и у getChannelsBatch — прошло ли
- * periodSeconds с последнего lastFullSyncAt (0 = ещё не синхронизировались).
+ * Есть ли у агента канал с устаревшим/отсутствующим access_hash
+ * (monitor-v5-hash-driven-sync): триггер полного прохода диалогов вместо суточного
+ * таймера. Устаревшим считается member-канал, у которого `chat_access_hash_updated_at`
+ * пуст либо получен раньше текущей авторизации (`sessionAuthorizedAt`) — тогда
+ * сохранённый access_hash невалиден (правило свежести, см. `accessHashFresh`) и его
+ * надо переполучить проходом диалогов. Фильтр `membership='member'` обязателен: иначе
+ * not_found/left с пустым хэшем триггерили бы проход вечно. `sessionAuthorizedAt`
+ * задан у всех агентов после разового бэкафилла; если по какой-то причине не задан —
+ * возвращаем false (проход не форсируем, штатное чтение свежести и так забракует хэш).
  */
-export function isFullSyncDue(agentId: string, log: Logger, periodSeconds: number): boolean {
-    const db = openDb(channelsDbPath(agentId), true);
+export function hasStaleAccessHashes(agentId: string, sessionAuthorizedAt: number | undefined, log: Logger): boolean {
+    if (sessionAuthorizedAt == null) return false;
+    const dbPath = channelsDbPath(agentId);
+    if (!fs.existsSync(dbPath)) return false;
+    const db = openDb(dbPath, true);
     try {
-        const row = db.prepare(`SELECT lastFullSyncAt FROM sync_state WHERE id = 1`).get() as
-            | { lastFullSyncAt: number }
-            | undefined;
-        const lastFullSyncAt = row?.lastFullSyncAt ?? 0;
-        const due = lastFullSyncAt === 0 || lastFullSyncAt <= Math.floor(Date.now() / 1000) - periodSeconds;
-        log.info(`[tg-channels-db] full_sync_due — agentId=${agentId} lastFullSyncAt=${lastFullSyncAt} due=${due}`);
-        return due;
-    } finally {
-        db.close();
-    }
-}
-
-/** Отметить полную синхронизацию выполненной текущим временем. */
-export function markFullSyncDone(agentId: string, log: Logger): void {
-    const db = openDb(channelsDbPath(agentId));
-    try {
-        db.prepare(`
-            INSERT INTO sync_state (id, lastFullSyncAt) VALUES (1, strftime('%s','now'))
-            ON CONFLICT(id) DO UPDATE SET lastFullSyncAt = excluded.lastFullSyncAt
-        `).run();
-        log.info(`[tg-channels-db] full_sync_done — agentId=${agentId}`);
+        const row = db.prepare(`
+            SELECT 1 FROM channels
+            WHERE membership = 'member'
+              AND (chat_access_hash_updated_at IS NULL OR chat_access_hash_updated_at < @auth)
+            LIMIT 1
+        `).get({ auth: sessionAuthorizedAt }) as { 1: number } | undefined;
+        const stale = row !== undefined;
+        log.info(`[tg-channels-db] has_stale_access_hashes — agentId=${agentId} sessionAuthorizedAt=${sessionAuthorizedAt} stale=${stale}`);
+        return stale;
     } finally {
         db.close();
     }
@@ -587,7 +609,7 @@ export function markChannelStatus(
     durationSeconds?: number,
     description?: string,
     source: OperationSource = "monitor",
-    writeAccessReason?: WriteAccessReason,
+    writeAccessReason?: string,
 ): void {
     let oldStatus: string | null = null;
     const db = openDb(channelsDbPath(agentId));
@@ -599,12 +621,18 @@ export function markChannelStatus(
         db.transaction(() => {
             oldStatus = (db.prepare(`SELECT status FROM channels WHERE chatId = ?`).get(chatId) as
                 { status: string | null } | undefined)?.status ?? null;
+            // dual-write membership (tg-peer-identity-model): только для членских
+            // статусов (membershipForStatus != null); прочие статус его не трогают.
+            const membership = membershipForStatus(status);
             db.prepare(`
                 UPDATE channels
-                SET status = @status, statusUpdatedAt = @now, statusDurationSeconds = @durationSeconds, status_description = @description
+                SET status = @status, statusUpdatedAt = @now, statusDurationSeconds = @durationSeconds, status_description = @description,
+                    membership = COALESCE(@membership, membership),
+                    membership_updated_at = CASE WHEN @membership IS NOT NULL THEN @now ELSE membership_updated_at END
                 WHERE chatId = @chatId
             `).run({
                 status,
+                membership,
                 now: Math.floor(Date.now() / 1000),
                 durationSeconds: durationSeconds ?? null,
                 description: description ?? null,
@@ -661,7 +689,8 @@ export function resetChannelStatuses(agentId: string, chatIds: string[], log: Lo
         const placeholders = chatIds.map(() => "?").join(",");
         const result = db.prepare(`
             UPDATE channels
-            SET status = NULL, statusUpdatedAt = NULL, statusDurationSeconds = NULL, status_description = NULL
+            SET status = NULL, statusUpdatedAt = NULL, statusDurationSeconds = NULL, status_description = NULL,
+                membership = 'member', membership_updated_at = strftime('%s','now')
             WHERE chatId IN (${placeholders})
         `).run(...chatIds);
         log.info(`[tg-channels-db] resetChannelStatuses — agentId=${agentId} reset=${result.changes}`);
@@ -913,8 +942,38 @@ export function saveChatAccessHash(agentId: string, chatId: string, accessHash: 
     const db = openDb(channelsDbPath(agentId));
     try {
         migratePostWatchColumns(db);
-        db.prepare(`UPDATE channels SET chatAccessHash = @accessHash WHERE chatId = @chatId`)
-            .run({ accessHash, chatId });
+        migratePeerIdentityColumns(db);
+        // Провенанс (tg-peer-identity-model): хэш узнан в текущей авторизации → отметка now.
+        db.prepare(`UPDATE channels SET chatAccessHash = @accessHash, chat_access_hash_updated_at = @now WHERE chatId = @chatId`)
+            .run({ accessHash, now: Math.floor(Date.now() / 1000), chatId });
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * access_hash действителен (tg-peer-identity-model, правило §2.2): получен не
+ * раньше текущей авторизации. `updatedAt`/`sessionAuthorizedAt` — unix-секунды.
+ * Отсутствие любой из отметок ⇒ невалиден (переполучать).
+ */
+export function accessHashFresh(updatedAt: number | null | undefined, sessionAuthorizedAt: number | undefined): boolean {
+    return updatedAt != null && sessionAuthorizedAt != null && updatedAt >= sessionAuthorizedAt;
+}
+
+/**
+ * Инвалидирует сохранённый access_hash чата обсуждения (tg-peer-identity-model
+ * §3.3): обнуляет `chatAccessHash` и его провенанс, чтобы следующее обращение
+ * переполучило хэш (`getFreshChatAccessHash` вернёт null). Вызывается при
+ * `PEER_ID_INVALID`/`CHANNEL_INVALID` по этому чату — редкая серверная ротация
+ * access_hash в пределах той же авторизации. In-memory `peerCache` при этом
+ * освежается штатным `getDialogs` на следующем прогоне.
+ */
+export function invalidateChatAccessHash(agentId: string, chatId: string, log: Logger): void {
+    const db = openDb(channelsDbPath(agentId));
+    try {
+        migratePeerIdentityColumns(db);
+        db.prepare(`UPDATE channels SET chatAccessHash = NULL, chat_access_hash_updated_at = NULL WHERE chatId = ?`).run(chatId);
+        log.info(`[tg-channels-db] invalidateChatAccessHash — agentId=${agentId} chatId=${chatId} (access_hash обнулён, будет переполучен)`);
     } finally {
         db.close();
     }
@@ -933,6 +992,37 @@ export function getChatAccessHash(agentId: string, chatId: string, log: Logger):
         const row = db.prepare(`SELECT chatAccessHash FROM channels WHERE chatId = ?`).get(chatId) as { chatAccessHash: string | null } | undefined;
         if (!row) log.warn(`[tg-channels-db] getChatAccessHash — agentId=${agentId} chatId=${chatId} не найден`);
         return row?.chatAccessHash ?? null;
+    } finally {
+        db.close();
+    }
+}
+
+/**
+ * accessHash чата обсуждения ТОЛЬКО если он действителен для текущей авторизации
+ * (tg-peer-identity-model): сверяет `chat_access_hash_updated_at` с
+ * `sessionAuthorizedAt` по правилу `accessHashFresh`. Возвращает null, если хэша
+ * нет или он устарел (получен до текущей `sessionString`) — вызывающий должен
+ * переполучить проходом диалогов. Заменяет прямое чтение `getChatAccessHash` на
+ * холодном пути review-listener (закрытие бага R2/R3).
+ */
+export function getFreshChatAccessHash(
+    agentId: string,
+    chatId: string,
+    sessionAuthorizedAt: number | undefined,
+    log: Logger,
+): string | null {
+    const dbPath = channelsDbPath(agentId);
+    if (!fs.existsSync(dbPath)) return null;
+    const db = openDb(dbPath, true);
+    try {
+        const row = db.prepare(`SELECT chatAccessHash, chat_access_hash_updated_at AS updatedAt FROM channels WHERE chatId = ?`)
+            .get(chatId) as { chatAccessHash: string | null; updatedAt: number | null } | undefined;
+        if (!row || !row.chatAccessHash) return null;
+        if (!accessHashFresh(row.updatedAt, sessionAuthorizedAt)) {
+            log.info(`[tg-channels-db] getFreshChatAccessHash — agentId=${agentId} chatId=${chatId} хэш устарел (updatedAt=${row.updatedAt ?? "null"} < sessionAuthorizedAt=${sessionAuthorizedAt ?? "null"}) — требуется переполучение`);
+            return null;
+        }
+        return row.chatAccessHash;
     } finally {
         db.close();
     }
@@ -979,10 +1069,14 @@ export function saveChannelIdentity(
 ): { ok: true } {
     const db = openDb(channelsDbPath(agentId));
     try {
+        migratePeerIdentityColumns(db);
+        // Провенанс channelAccessHash (tg-peer-identity-model): резолв связи идёт в
+        // текущей авторизации, значит хэш свежий → отметка now (NULL, если хэша нет).
         db.prepare(`
             UPDATE channels
             SET channelId = @channelId, channelAccessHash = @accessHash,
-                channelUsername = @username, channelTitle = @title, channelResolved = 1
+                channelUsername = @username, channelTitle = @title, channelResolved = 1,
+                channel_access_hash_updated_at = CASE WHEN @accessHash IS NOT NULL THEN @now ELSE NULL END
             WHERE chatId = @chatId
         `).run({
             chatId,
@@ -990,6 +1084,7 @@ export function saveChannelIdentity(
             accessHash: identity?.accessHash ?? null,
             username: identity?.username ?? null,
             title: identity?.title ?? null,
+            now: Math.floor(Date.now() / 1000),
         });
         return { ok: true };
     } finally {
@@ -1032,15 +1127,23 @@ export interface JoinedChannelIdentityRow {
 export function upsertChannelIdentityFromJoin(
     agentId: string,
     identity: JoinedChannelIdentityRow,
-    writeAccessReason: WriteAccessReason | null,
+    writeAccessReason: string | null,
     log: Logger,
 ): void {
     initChannels(agentId, log);
     const db = openDb(channelsDbPath(agentId));
     try {
+        // tg-peer-identity-model: успешный join — membership='member' (dual-write);
+        // chatAccessHash/channelAccessHash получены в текущей авторизации, поэтому
+        // их провенанс *_updated_at = now; peer_type по виду chatId (megagroup для
+        // -100…, иначе basic_group — точный broadcast/megagroup доберётся резолвом).
+        const now = Math.floor(Date.now() / 1000);
+        const peerType = identity.chatId.startsWith("-100") ? "megagroup" : "basic_group";
         db.prepare(`
-            INSERT INTO channels (chatId, title, chatUsername, lastProcessedAt, channelId, channelAccessHash, channelUsername, channelResolved, chatAccessHash, write_access_reason, write_access_until)
-            VALUES (@chatId, @title, @chatUsername, 0, @channelId, @channelAccessHash, @channelUsername, 1, @chatAccessHash, @writeAccessReason, NULL)
+            INSERT INTO channels (chatId, title, chatUsername, lastProcessedAt, channelId, channelAccessHash, channelUsername, channelResolved, chatAccessHash, write_access_reason, write_access_until,
+                peer_type, membership, membership_updated_at, chat_access_hash_updated_at, channel_access_hash_updated_at)
+            VALUES (@chatId, @title, @chatUsername, 0, @channelId, @channelAccessHash, @channelUsername, 1, @chatAccessHash, @writeAccessReason, NULL,
+                @peerType, 'member', @now, @now, @now)
             ON CONFLICT(chatId) DO UPDATE SET
                 title = excluded.title,
                 chatUsername = excluded.chatUsername,
@@ -1054,7 +1157,12 @@ export function upsertChannelIdentityFromJoin(
                 statusDurationSeconds = NULL,
                 status_description = NULL,
                 write_access_reason = excluded.write_access_reason,
-                write_access_until = NULL
+                write_access_until = NULL,
+                peer_type = excluded.peer_type,
+                membership = 'member',
+                membership_updated_at = excluded.membership_updated_at,
+                chat_access_hash_updated_at = excluded.chat_access_hash_updated_at,
+                channel_access_hash_updated_at = excluded.channel_access_hash_updated_at
         `).run({
             chatId: identity.chatId,
             title: identity.title,
@@ -1064,6 +1172,8 @@ export function upsertChannelIdentityFromJoin(
             channelUsername: identity.channelUsername,
             chatAccessHash: identity.chatAccessHash,
             writeAccessReason,
+            peerType,
+            now,
         });
         log.info(`[tg-channels-db] upsertChannelIdentityFromJoin — agentId=${agentId} chatId=${identity.chatId} writeAccessReason=${writeAccessReason ?? "null"}`);
     } finally {
@@ -1599,7 +1709,8 @@ export function setLeftChannelStatus(
                 { status: string | null } | undefined)?.status ?? null;
             db.prepare(`
                 UPDATE channels
-                SET status = @status, statusUpdatedAt = strftime('%s','now'), statusDurationSeconds = NULL, status_description = NULL
+                SET status = @status, statusUpdatedAt = strftime('%s','now'), statusDurationSeconds = NULL, status_description = NULL,
+                    membership = 'left', membership_updated_at = strftime('%s','now')
                 WHERE chatId = @chatId
             `).run({ chatId, status });
         })();

@@ -19,6 +19,7 @@ import * as fs from "fs";
 import Database from "better-sqlite3";
 
 import { listAgentIds, repliesDbPath, REPORT_AGENT_ID, buildPersonaIndex } from "../../core/config";
+import { buildAgentFunnelChannelIndex } from "../tg-agent-autoregistration/persona-template";
 import { getChannelSendBreakdown } from "../../core/db/replies";
 import { isAgentActive } from "../../core/db/tasks";
 import { listPrivateInviteLinks } from "../../core/db/private-invites";
@@ -122,13 +123,21 @@ export interface RestrictedAgentRow {
     restrictionType: RestrictionType;
 }
 
+/** Итог заявок по одной персоне (per-persona-funnel-channel): сумма по её агентам. */
+export interface PersonaFunnelRequests {
+    persona: string;
+    abs: number;
+    delta: number;
+    /** Пометка недоступности заявок для этой персоны (нет прав `invite_users` в её канале). */
+    note?: string;
+}
+
 export interface FunnelResult {
     window: DayWindow;
     agents: AgentFunnelRow[];
-    privateRequestsAbs: number | null;
-    privateRequestsDelta: number | null;
-    /** Пометка, если заявки недоступны (нет прав / не задан приватный канал). */
-    privateNote?: string;
+    /** Итог заявок в приватный канал в разрезе персон (per-persona-funnel-channel).
+     *  Персоны без funnelPrivateChannelId сюда не попадают. */
+    privateRequestsByPersona: PersonaFunnelRequests[];
     /** Агенты, которым за отчётные сутки наложено ограничение (`agent_restrictions.restricted_at` в окне). */
     restrictedAgents: RestrictedAgentRow[];
 }
@@ -137,7 +146,6 @@ export interface CollectOptions {
     window: DayWindow;
     persist: boolean;
     adminAgentId: string;
-    privateChannelId?: string;
     /**
      * Рвать MTProto-соединение каждого агента сразу после сбора его этапов 5-7,
      * с паузой перед снятием замка (TelegramService.disconnectAgent). Для
@@ -212,27 +220,33 @@ export async function collectFunnel(
     opts: CollectOptions,
     log: Logger,
 ): Promise<FunnelResult> {
-    const { window, persist, adminAgentId, privateChannelId, disconnectAfterEachAgent } = opts;
+    const { window, persist, adminAgentId, disconnectAfterEachAgent } = opts;
     const nowSec = Math.floor(Date.now() / 1000);
     const guardDayStart = startOfUtcPlus5Day(nowSec);
 
     const result: FunnelResult = {
         window,
         agents: [],
-        privateRequestsAbs: null,
-        privateRequestsDelta: null,
+        privateRequestsByPersona: [],
         restrictedAgents: [],
     };
+
+    // ── Персона и приватный канал воронки по каждому агенту (per-persona-funnel-channel) ──
+    // Строятся один раз на прогон; канал резолвится agentId → persona →
+    // funnelPrivateChannelId (profile_data.json персоны). personaIndex нужен и ниже
+    // в цикле агентов, поэтому строится здесь, а не позже.
+    const personaIndex = buildPersonaIndex();
+    const agentChannelIndex = buildAgentFunnelChannelIndex(personaIndex);
 
     // ── Фильтр активных агентов (US-4) — до всех остальных шагов: неактивный
     // агент не тратит на себя ни МТProto-, ни БД-обращений дальше. ──
     const activeAgentIds = listAgentIds().filter(isAgentActive);
 
     // ── Заявки в приватный канал: по персональной ссылке каждого агента (US-3) ──
-    // REPORT_AGENT_ID — администратор приватного канала (report-agent-isolation).
-    // Один tg.loadAccount на весь цикл ссылок, не на каждый запрос. Агент без
-    // записи в private_invite_links не попадает в links — MTProto-запрос для
-    // него не делается.
+    // REPORT_AGENT_ID — единый администратор всех персональных каналов (Модель A,
+    // report-agent-isolation). Один tg.loadAccount на весь цикл ссылок, не на
+    // каждый запрос. Агент без записи в private_invite_links не попадает в links —
+    // MTProto-запрос для него не делается.
     //
     // Фильтр — по listAgentIds() (реально существующие агенты), а НЕ по
     // activeAgentIds: человек кликает по персональной ссылке агента в его
@@ -246,18 +260,27 @@ export async function collectFunnel(
             .map((r) => [r.agentId, r.inviteLink]),
     );
     const privateAbsByAgent = new Map<string, number>();
+    // Пометка недоступности заявок в разрезе персоны (нет прав invite_users в её
+    // канале) — попадает только к затронутой персоне, не ко всем.
+    const privateNoteByPersona = new Map<string, string>();
 
-    if (privateChannelId && links.size > 0) {
+    if (links.size > 0) {
         tg.loadAccount(REPORT_AGENT_ID);
         for (const [agentId, link] of links) {
+            // Канал персоны агента; peer запроса обязателен и должен быть именно
+            // тем каналом, которому принадлежит ссылка. Нет канала у персоны →
+            // подсчёт заявок для агента пропускается (значение остаётся NULL).
+            const channelId = agentChannelIndex.get(agentId) ?? null;
+            if (!channelId) continue;
             try {
                 const pr = await withTimeout(
-                    tg.getPendingJoinRequests(privateChannelId, { link }),
+                    tg.getPendingJoinRequests(channelId, { link }),
                     AGENT_STAGES_5_TO_7_TIMEOUT_MS,
                     `private channel requests for agent=${agentId}`,
                 );
                 if ("error" in pr) {
-                    result.privateNote = "недоступно (нет прав invite_users)";
+                    const persona = personaIndex.get(agentId);
+                    if (persona) privateNoteByPersona.set(persona, "недоступно (нет прав invite_users)");
                 } else {
                     privateAbsByAgent.set(agentId, pr.count);
                 }
@@ -277,7 +300,6 @@ export async function collectFunnel(
         restrictionType: r.restriction_type,
     }));
 
-    const personaIndex = buildPersonaIndex();
     for (const agentId of activeAgentIds) {
         const row: AgentFunnelRow = {
             agentId,
@@ -471,18 +493,32 @@ export async function collectFunnel(
         }
     }
 
-    // ── Платформенный итог заявок — сумма по активным агентам (result.agents) +
-    // по неактивным со ссылкой (inactiveLinkedAgents); раньше считали только по
-    // result.agents, поэтому итог был занижен ровно на неактивных агентов.
-    if (privateChannelId && !result.privateNote) {
-        let abs = result.agents.reduce((s, a) => s + (a.privateRequestsAbs ?? 0), 0);
-        let delta = result.agents.reduce((s, a) => s + (a.privateRequestsDelta ?? 0), 0);
-        for (const v of inactiveLinkedAgents.values()) {
-            abs += v.abs;
-            delta += v.delta ?? 0;
-        }
-        result.privateRequestsAbs = abs;
-        result.privateRequestsDelta = delta;
+    // ── Итог заявок по персонам (per-persona-funnel-channel) ──
+    // Сумма по активным агентам (result.agents) + по неактивным со ссылкой
+    // (inactiveLinkedAgents), сгруппированная по персоне агента. Персона попадает
+    // в итог, только если хотя бы у одного её агента заявки собраны (значит у
+    // персоны задан канал) либо весь её сбор оказался недоступен (note).
+    const byPersona = new Map<string, { abs: number; delta: number }>();
+    const addToPersona = (persona: string | undefined, abs: number | null, delta: number | null): void => {
+        if (!persona || abs == null) return;
+        const cur = byPersona.get(persona) ?? { abs: 0, delta: 0 };
+        cur.abs += abs;
+        cur.delta += delta ?? 0;
+        byPersona.set(persona, cur);
+    };
+    for (const a of result.agents) addToPersona(a.persona ?? undefined, a.privateRequestsAbs, a.privateRequestsDelta);
+    for (const [agentId, v] of inactiveLinkedAgents) addToPersona(personaIndex.get(agentId), v.abs, v.delta);
+
+    result.privateRequestsByPersona = [...byPersona.entries()].map(([persona, v]) => ({
+        persona,
+        abs: v.abs,
+        delta: v.delta,
+        note: privateNoteByPersona.get(persona),
+    }));
+    // Персоны, у которых заявки целиком недоступны (нет прав) и потому нет сумм —
+    // всё равно показать с пометкой, чтобы пробел был виден, а не молчалив.
+    for (const [persona, note] of privateNoteByPersona) {
+        if (!byPersona.has(persona)) result.privateRequestsByPersona.push({ persona, abs: 0, delta: 0, note });
     }
 
     return result;

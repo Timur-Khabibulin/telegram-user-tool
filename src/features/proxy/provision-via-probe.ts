@@ -41,14 +41,14 @@ export async function provisionProxyViaProbe(
             return null;
         }
         const proxy = toProxyConfig(candidate, country);
-        log.info(`[provision-via-probe] ${agentId}: попытка ${attempt}/${maxCandidates} — probe через ${proxy.host}:${proxy.port}`);
+        log.info(`[provision-via-probe] ${agentId}: попытка ${attempt}/${maxCandidates} — проверка ${proxy.host}:${proxy.port}`);
         try {
             await probe(proxy);
             saveProxyToAccountConfig(agentId, proxy);
             log.info(`[provision-via-probe] ${agentId}: рабочий прокси ${proxy.host}:${proxy.port} записан (попытка ${attempt})`);
             return proxy;
         } catch (err: any) {
-            log.warn(`[provision-via-probe] ${agentId}: кандидат ${proxy.host}:${proxy.port} не прошёл probe — ${err?.message ?? err}`);
+            log.warn(`[provision-via-probe] ${agentId}: кандидат ${proxy.host}:${proxy.port} не прошёл проверку — ${err?.message ?? err}`);
         }
     }
 

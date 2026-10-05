@@ -66,6 +66,19 @@ export function upsertPrivateInviteLink(adminAgentId: string, agentId: string, i
     }
 }
 
+/** Ссылка агента из реестра или null, если её ещё нет (для переиспользования без пересоздания). */
+export function getPrivateInviteLink(adminAgentId: string, agentId: string): string | null {
+    const db = openDb(adminAgentId);
+    try {
+        const row = db.prepare(
+            `SELECT invite_link AS inviteLink FROM private_invite_links WHERE agent_id = @agentId`,
+        ).get({ agentId }) as { inviteLink: string } | undefined;
+        return row?.inviteLink ?? null;
+    } finally {
+        db.close();
+    }
+}
+
 /** Подтверждает, что ссылка агента реально вставлена в его закреплённый пост. */
 export function markPostUpdated(adminAgentId: string, agentId: string): void {
     const db = openDb(adminAgentId);

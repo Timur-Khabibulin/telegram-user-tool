@@ -14,6 +14,7 @@ import { upsertRestriction } from "../core/db/agent-restrictions";
 import { recordAccountError } from "../core/db/error-log";
 import { FUNNEL_ADMIN_AGENT_ID } from "../core/config";
 import { generateDM } from "../llm/prompts";
+import { LlmCallError } from "../llm/error-class";
 
 const DAILY_LIMIT = 15;
 const PER_RUN_LIMIT = 2;
@@ -72,9 +73,20 @@ export async function runDmSend(ctx: SkillContext): Promise<SkillStatus> {
             break;
         }
 
-        // 5a — Сформулировать DM (LLM)
+        // 5a — Сформулировать DM (LLM). Неуспех LLM по одному кандидату не роняет
+        // прогон (R19): кандидат помечается skipped, идём к следующему.
         const dmPrompt = generateDM(candidate.msgText);
-        const dmText = await llm.complete({ system: persona, prompt: dmPrompt });
+        let dmText: string;
+        try {
+            dmText = await llm.complete({ system: persona, prompt: dmPrompt });
+        } catch (err: any) {
+            if (err instanceof LlmCallError) {
+                log.warn(`[dm-send] LLM не удался для userId=${candidate.userId} (${err.errorClass}) — пропуск: ${err.message}`);
+                updateDmCandidateStatus(agentId, candidate.id, "skipped", log);
+                continue;
+            }
+            throw err;
+        }
 
         // 5b — Отправить DM (chatId + msgId → InputPeerUserFromMessage)
         let sendResult;

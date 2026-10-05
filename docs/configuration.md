@@ -45,12 +45,25 @@
 | `photo_profile_1.*..N.*` | фото профиля (расширение любое) — используются один раз при регистрации |
 | `channel_photo.*` | фото личного канала — используется один раз при регистрации |
 | `channel_post_photo.*` | фото к первому посту — используется один раз при регистрации |
-| `default_agent_data.json` | `apiId`/`apiHash`/`deviceModel`/`2fa`, общие на персону — используется один раз при регистрации |
 | `profile_data.json` | `name`/`nick`/`birthdate`/`bio`/`channelName` — используется один раз при регистрации |
+
+`apiId`/`apiHash`/`2fa` в шаблоне персоны больше НЕ хранятся — они вынесены в общую
+заготовку (см. ниже, tg-agent-pool-provisioning), одинаковую для всех персон.
 
 Заполняется оператором вручную до регистрации агента — код каталог персоны не создаёт
 (кроме `tg-agent-create`, Шаг 7, при явном запросе новой персоны — там создаётся только
 `SOUL.md`, остальные файлы шаблона для интерактивной регистрации не нужны).
+
+## Общая заготовка учётных данных — `~/.openclaw/account-defaults/`
+
+Общие для ВСЕХ аккаунтов технические значения, вынесенные из персоны
+(tg-agent-pool-provisioning). Читаются только фазой 1 (продюсер пула,
+`loadAccountDefaults` в `src/core/config.ts`); потребителям пула не нужны — `apiId`/
+`apiHash` уже лежат в `tg-account.json` пул-аккаунта.
+
+| Файл | Назначение |
+|---|---|
+| `default_agent_data.json` | `apiId`/`apiHash`/`2fa`, общие на все аккаунты — используются при подготовке пул-аккаунта |
 
 ## tg-agent-autoregistration — `~/.openclaw/tg-agent-autoregistration/`
 
@@ -65,21 +78,39 @@
 |---|---|
 | `staging/agent<N>/` | данные аккаунта до статуса `done`: `tdata/`, `status.json`. Не путать с `workspace-agent<N>/` — сюда `listAgentIds()` не заглядывает, недорегистрированный агент не виден платформенным cron-скриптам. |
 
-## LLM-доступ — primary codex-подписка + fallback DeepSeek
+## LLM-доступ — пул codex-подписок с failover + DeepSeek-floor
 
-Собирается в `src/llm/client.ts` (`createLlmClient`) через `ai-fallback`
-(`createFallback([primary, fallback])`):
+Собирается в `src/llm/client.ts` (`createLlmClient`); цепочку провайдеров и
+переключение ведёт `src/llm/failover.ts` (`withFailover`), классификацию ошибок —
+`src/llm/error-class.ts`, cooldown — `src/core/db/codex-cooldown.ts`
+(llm-multi-account-failover).
 
-- **Primary** — ChatGPT-подписка через codex: `@openai-oauth/ai-sdk`
-  (`createOpenAIOAuth(openaiCredentials({ authFilePath }))`), модель `gpt-5.6-sol`.
-  Токен — общий `~/.openclaw/codex-auth/auth.json` (OAuth ChatGPT, один на всех
-  агентов), рефреш access-token делает библиотека автоматически. Библиотека шлёт
-  корректный codex-`originator`, поэтому запросы проходят гейтинг ($0 за токены на
-  подписке). Каталог `codex-auth/` обязателен.
-- **Fallback** — DeepSeek `deepseek-flash` (`@ai-sdk/deepseek`), ключ
-  `DEEPSEEK_API_KEY` из `~/.openclaw/secrets.env`. Срабатывает на **любую** ошибку
-  primary; переключение логируется в journald. При отсутствии ключа `createLlmClient`
-  бросает явную ошибку конфигурации (fallback обязателен).
+- **Пул codex-слотов** — несколько ChatGPT-подписок, каждая своим OAuth-токеном в
+  `~/.openclaw/codex-auth/<slot>/auth.json`. Модель `gpt-6-luna`, доступ через
+  `@openai-oauth/ai-sdk` (корректный codex-`originator`, $0 за токены на подписке).
+  Порядок и состав слотов — env `CODEX_ACCOUNTS` (список имён слева направо =
+  приоритет); при пустом env — автодискавери подкаталогов `codex-auth/`; легаси
+  `codex-auth/auth.json` (без подкаталогов) = единственный слот `default` (обратная
+  совместимость с конфигурацией одного аккаунта). Рефреш access-token делает библиотека.
+- **Failover по приоритету** — первый доступный слот → следующий → … → DeepSeek
+  последним. Переход к следующему слоту с повтором — ТОЛЬКО при исчерпании лимита
+  (`usage_limit`); при `401` — рефреш токена и один повтор на том же слоте; прочие
+  классы (`schema_error`/`transient`/`auth_403`/`runtime_error`/`other`) — запись в лог
+  без повтора и фолбэка.
+- **Cooldown по остатку лимита** — при `usage_limit` слот выводится из оборота до
+  момента сброса (`reset_at` из `GET /backend-api/wham/usage`, без траты квоты
+  генерации), запись — в host-level `~/.openclaw/codex-cooldown.db` (общий на хост).
+  Доступность слота проверяется по сохранённой дате, не пробным запросом. Если
+  `/wham/usage` недоступен — консервативное окно `CODEX_COOLDOWN_FALLBACK_SECONDS`
+  (по умолчанию 5 ч).
+- **DeepSeek-floor** — `deepseek-flash` (`@ai-sdk/deepseek`), ключ `DEEPSEEK_API_KEY`
+  из `~/.openclaw/secrets.env`, последним звеном цепочки. Ключ обязателен — при его
+  отсутствии `createLlmClient` бросает ошибку конфигурации. Предохранитель работает
+  только при ненулевом балансе DeepSeek (операционная зависимость).
+- **Изоляция по рабочему элементу** — при неуспехе LLM по одному элементу (канал/тред/
+  пост/DM) бросается типизированная `LlmCallError`; скилл ловит её per-item и пропускает
+  элемент, прогон продолжается (не падает целиком). Переключения и cooldown логируются
+  в journald строками `[llm] …`.
 
 ## Секреты внешних сервисов — `~/.openclaw/secrets.env`
 
@@ -88,7 +119,9 @@ dotenv-загрузки в коде — переменные должны быт
 
 | Переменная | Назначение | Читается в |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | доступ к DeepSeek (`deepseek-flash`) — **fallback** LLM при любой ошибке codex-primary | `src/llm/client.ts` (`createLlmClient`) |
+| `DEEPSEEK_API_KEY` | доступ к DeepSeek (`deepseek-flash`) — **floor** LLM, последнее звено цепочки failover (обязателен) | `src/llm/client.ts` (`createLlmClient`) |
+| `CODEX_ACCOUNTS` | список имён codex-слотов через запятую (приоритет слева направо); пусто → автодискавери подкаталогов `~/.openclaw/codex-auth/`, легаси `auth.json`=`default` | `src/core/config.ts` |
+| `CODEX_COOLDOWN_FALLBACK_SECONDS` | окно cooldown слота (сек), если `/wham/usage` недоступен; по умолчанию 18000 (5 ч) | `src/core/config.ts` |
 | `ASOCKS_API_KEY` | доступ к asocks.com для подбора/провижининга мобильных прокси | `src/scripts/ops/provision-proxy-for-new-agent.ts`, `src/scripts/ops/provision-mobile-proxy.ts` |
 | `TELEGRAM_REVIEW_BOT_TOKEN` | токен общего Bot API-бота ручного ревью (post-comment-review) — один на платформу, не per-agent | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
 | `TELEGRAM_REVIEW_CHAT_ID` | id чата ревьюеров, куда бот шлёт запросы на подтверждение | `src/core/review-bot-api.ts` (через `src/core/config.ts`) |
@@ -117,8 +150,13 @@ user-unit `root`-а — `~/.config/systemd/user/openclaw-gateway.service` (эт�
 | Константа | Назначение |
 |---|---|
 | `FUNNEL_ADMIN_AGENT_ID` | владелец `funnel.db`/`discovery.db`/`reports/`/`private-invites.db` |
-| `REPORT_AGENT_ID` | получатель отчётов (funnel-report, daily-summary) и администратор приватного канала (подсчёт заявок, создание инвайт-ссылок); исключён из `listAgentIds()`, не запускается диспетчером и не ставится в расписание |
-| `FUNNEL_PRIVATE_CHANNEL_ID` | ID приватного канала для подсчёта заявок на вступление |
+| `REPORT_AGENT_ID` | получатель отчётов (funnel-report, daily-summary) и единый администратор всех приватных каналов персон (подсчёт заявок, создание инвайт-ссылок); исключён из `listAgentIds()`, не запускается диспетчером и не ставится в расписание |
+
+ID приватного канала воронки задаётся **per-persona** в шаблоне персоны
+`~/.openclaw/personas/<persona>/profile_data.json` полем `funnelPrivateChannelId`
+(marked peer id, вид `-100…`), а не константой в коде (per-persona-funnel-channel).
+Персона без этого поля не участвует в подсчёте заявок. `REPORT_AGENT_ID` должен быть
+админом (право `invite_users`) каждого такого канала.
 
 ## TGStat — `TGSTAT_TOKEN`
 

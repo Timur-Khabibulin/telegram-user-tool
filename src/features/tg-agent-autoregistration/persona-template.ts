@@ -8,7 +8,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { personasRoot } from "../../core/config";
+import { personasRoot, buildPersonaIndex } from "../../core/config";
 
 export function autoregistrationRoot(): string {
     return path.join(os.homedir(), ".openclaw", "tg-agent-autoregistration");
@@ -20,12 +20,6 @@ export function templatesDir(personName: string): string {
 }
 
 export class PersonaTemplateError extends Error {}
-
-export interface DefaultAgentData {
-    apiId: number;
-    apiHash: string;
-    "2fa": string;
-}
 
 export interface Birthdate {
     day: number;
@@ -39,6 +33,10 @@ export interface ProfileData {
     birthdate: Birthdate;
     bio: string;
     channelName: string;
+    /** ID приватного канала воронки этой персоны (marked peer id, вид `-100…`) —
+     *  per-persona-funnel-channel. Опционально: персона без него не участвует в
+     *  подсчёте заявок. Не путать с `channelName` (публичный канал персоны). */
+    funnelPrivateChannelId?: string;
 }
 
 export interface PersonaTemplate {
@@ -50,7 +48,6 @@ export interface PersonaTemplate {
     photoProfilePaths: string[];
     channelPhotoPath: string | null;
     channelPostPhotoPath: string | null;
-    defaultAgentData: DefaultAgentData;
     profileData: ProfileData;
     /** SOUL.md больше не обязателен (в реге не используется) — null, если файла нет. */
     soulMdPath: string | null;
@@ -125,20 +122,12 @@ export function loadPersonaTemplate(personName: string, requireChannel: boolean)
         ? requireFileWithAnyExtension(dir, "channel_post_photo")
         : optionalFileWithAnyExtension(dir, "channel_post_photo");
 
-    const defaultAgentDataPath = requireFile(dir, "default_agent_data.json");
     const profileDataPath = requireFile(dir, "profile_data.json");
     const soulMdPath = optionalFile(dir, "SOUL.md");
 
     const photoProfilePaths = listProfilePhotos(dir);
     if (photoProfilePaths.length === 0) {
         throw new PersonaTemplateError(`шаблон персоны "${personName}": нет ни одного photo_profile_N.*`);
-    }
-
-    const defaultAgentData = JSON.parse(fs.readFileSync(defaultAgentDataPath, "utf-8")) as DefaultAgentData;
-    if (!defaultAgentData.apiId || !defaultAgentData.apiHash || !defaultAgentData["2fa"]) {
-        throw new PersonaTemplateError(
-            `шаблон персоны "${personName}": default_agent_data.json неполон (нужны apiId, apiHash, 2fa)`,
-        );
     }
 
     // channelName нужен только для создания канала (requireChannel).
@@ -155,8 +144,44 @@ export function loadPersonaTemplate(personName: string, requireChannel: boolean)
         photoProfilePaths,
         channelPhotoPath,
         channelPostPhotoPath,
-        defaultAgentData,
         profileData,
         soulMdPath,
     };
+}
+
+/**
+ * Лёгкое чтение `funnelPrivateChannelId` персоны (per-persona-funnel-channel):
+ * парсит только `profile_data.json`, без канальных файлов (`post.txt`,
+ * `channel_photo.*`) — в отличие от `loadPersonaTemplate`, который на их
+ * отсутствии падает. Нужно сбору воронки и созданию инвайт-ссылок, где важен
+ * лишь id канала. Возвращает null, если файла/поля нет или JSON не читается —
+ * вызывающий трактует это как «канал персоны не задан».
+ */
+export function readPersonaFunnelChannelId(personName: string): string | null {
+    const p = path.join(templatesDir(personName), "profile_data.json");
+    try {
+        const cfg = JSON.parse(fs.readFileSync(p, "utf-8"));
+        return cfg.funnelPrivateChannelId != null ? String(cfg.funnelPrivateChannelId) : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Карта `agentId → funnelPrivateChannelId | null` через персону агента
+ * (per-persona-funnel-channel): `buildPersonaIndex()` даёт `agentId → persona`,
+ * поверх — одно чтение `profile_data.json` на персону (кэш `perPersona`), не на
+ * агента. Агент без персоны в индексе или персона без канала → null. Общий
+ * резолвер для сбора воронки и создания инвайт-ссылок.
+ */
+export function buildAgentFunnelChannelIndex(
+    personaIndex: Map<string, string> = buildPersonaIndex(),
+): Map<string, string | null> {
+    const perPersona = new Map<string, string | null>();
+    const result = new Map<string, string | null>();
+    for (const [agentId, persona] of personaIndex) {
+        if (!perPersona.has(persona)) perPersona.set(persona, readPersonaFunnelChannelId(persona));
+        result.set(agentId, perPersona.get(persona) ?? null);
+    }
+    return result;
 }

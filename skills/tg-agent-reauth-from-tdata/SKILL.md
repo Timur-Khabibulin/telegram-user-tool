@@ -105,7 +105,3 @@ systemd-run \
 | Инструмент | Шаг | Файл |
 |---|---|---|
 | `systemd-run` → `ops/tg-agent-reauth-from-tdata.ts` (detached) | 2 | src/scripts/ops/tg-agent-reauth-from-tdata.ts → src/features/tg-agent-reauth-from-tdata/run.ts |
-
-Plugin-тул `tg_agent_reauth_from_tdata` (index.ts) остаётся для точечных случаев, но
-для операторского прогона не используется — он исполняется синхронно внутри хода
-агента и потому упирается в per-tool-call таймаут runtime.

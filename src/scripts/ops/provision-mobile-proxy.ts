@@ -189,7 +189,14 @@ async function main(): Promise<void> {
     }
 }
 
-main().catch((err) => {
-    log.error(`[provision-mobile-proxy] fatal: ${err?.message ?? err}`);
-    process.exit(1);
-});
+// process.exit после завершения: прогон создаёт множество GramJS-клиентов (проверка
+// кандидатов), их reconnect-таймеры держат event loop живым и не дают процессу выйти
+// сам по себе. Пока процесс жив, он держит session-локи проверенных аккаунтов — без
+// явного выхода локи не освобождаются (реальный инцидент 27.09: зависший процесс держал
+// локи всего пула ~15ч → persona-deploy получал SessionBusyError и закарантинил весь пул).
+main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+        log.error(`[provision-mobile-proxy] fatal: ${err?.message ?? err}`);
+        process.exit(1);
+    });

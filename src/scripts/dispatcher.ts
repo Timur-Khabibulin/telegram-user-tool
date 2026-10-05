@@ -34,6 +34,7 @@ import {
 } from "../core/db/tasks";
 import { ensureRunsSchema, insertRun } from "../core/db/runs";
 import { ensureDispatcherRunsSchema, insertDispatcherRun } from "../core/db/dispatcher-runs";
+import { ensureProxyHealthSchema } from "../core/db/proxy-health";
 import { getActiveRestriction, upsertRestriction } from "../core/db/agent-restrictions";
 import { recordAccountError } from "../core/db/error-log";
 import { withLlmLogging } from "../core/db/llm-log";
@@ -145,12 +146,15 @@ async function main(): Promise<void> {
         );
     }
 
-    // Шаг 0 — схемы tasks, runs и dispatcher_runs (идемпотентно).
+    // Шаг 0 — схемы tasks, runs, dispatcher_runs и proxy_health (идемпотентно).
     ensureTasksSchema(agentId);
     ensureRunsSchema(agentId);
     ensureDispatcherRunsSchema(agentId);
+    ensureProxyHealthSchema(agentId);
 
     const tg = new TelegramService(log);
+    // proxy-failure-rotation: диспетчер — плановый прогон, ведёт счётчик провалов прокси.
+    tg.enableProxyHealthTracking();
 
     // Шаг 1 — загрузить tg-account.json (без сети; падает рано при отсутствии).
     tg.loadAccount(agentId);
@@ -198,6 +202,7 @@ async function main(): Promise<void> {
             const t0 = Date.now();
             const cpuBefore = process.cpuUsage();
             const llmCallsBefore = llm.requestCount;
+            const usageBefore = llm.tokenUsage;
 
             let status: SkillStatus;
             let clientDisconnected = false;
@@ -230,6 +235,10 @@ async function main(): Promise<void> {
             const durationMs = Date.now() - t0;
             const cpuUsed = process.cpuUsage(cpuBefore);
             const llmCalls = llm.requestCount - llmCallsBefore;
+            const usageAfter = llm.tokenUsage;
+            const inputTokens = usageAfter.inputTokens - usageBefore.inputTokens;
+            const outputTokens = usageAfter.outputTokens - usageBefore.outputTokens;
+            const totalTokens = usageAfter.totalTokens - usageBefore.totalTokens;
 
             // Запись прогона в runs + строка статуса в journald (§2). Сбой записи
             // не должен валить прогон — оборачиваем в try/catch.
@@ -244,6 +253,9 @@ async function main(): Promise<void> {
                     llmCalls,
                     cpuUserMs: Math.round(cpuUsed.user / 1000),
                     cpuSystemMs: Math.round(cpuUsed.system / 1000),
+                    inputTokens,
+                    outputTokens,
+                    totalTokens,
                 });
             } catch (err: any) {
                 log.error(`[dispatcher] agent=${agentId} — failed to record run for ${type}: ${err?.message ?? err}`);

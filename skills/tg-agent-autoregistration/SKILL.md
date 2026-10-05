@@ -5,6 +5,11 @@ description: "Массовая автоматическая регистраци
 
 # tg-agent-autoregistration — массовая регистрация агентов из tdata
 
+> **[DEPRECATED]** Заменён двумя фазами: `tg-agent-pool-provision` (подготовка
+> обезличенных пул-аккаунтов) + `tg-agent-persona-deploy` (развёртывание под
+> персону). Оставлен как обкатанный fallback до архивации change
+> `tg-agent-pool-provisioning`; для новых прогонов используйте две фазы.
+
 Скилл собирает параметры у оператора и запускает весь прогон отсоединённым
 фоновым процессом (ops-скрипт), а итоговый отчёт приходит в Saved Messages
 получателя отчётов.
@@ -113,7 +118,3 @@ Google Drive) распаковывает ZIP, затем обрабатывае�
 | Инструмент | Шаг | Файл |
 |---|---|---|
 | `systemd-run` → `ops/tg-agent-autoregistration.ts` (detached) | 2 | src/scripts/ops/tg-agent-autoregistration.ts → src/features/tg-agent-autoregistration/run.ts |
-
-Plugin-тул `tg_agent_autoregistration_run` (index.ts) остаётся для точечных
-случаев и ретраев, но для пачки не используется — он исполняется синхронно внутри
-хода агента и потому упирается в per-tool-call таймаут runtime.

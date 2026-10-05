@@ -95,8 +95,3 @@ systemd-run \
 | Инструмент | Шаг | Файл |
 |---|---|---|
 | `systemd-run` → `ops/private-invite-links.ts` (detached) | 2 | src/scripts/ops/private-invite-links.ts → src/features/private-invite-links/run.ts |
-
-Plugin-тул `tg_private_invite_links` (index.ts) остаётся тонкой обёрткой над той же
-логикой для точечных случаев, но для операторского прогона по списку не используется —
-он исполняется синхронно внутри хода агента и потому упирается в per-tool-call таймаут
-runtime.

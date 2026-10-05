@@ -9,7 +9,8 @@
 
 import type { Logger } from "../../core/logger";
 import type { TelegramService } from "../../core/telegram/service";
-import { FUNNEL_ADMIN_AGENT_ID, FUNNEL_PRIVATE_CHANNEL_ID, REPORT_AGENT_ID } from "../../core/config";
+import { FUNNEL_ADMIN_AGENT_ID, REPORT_AGENT_ID, buildPersonaIndex } from "../../core/config";
+import { buildAgentFunnelChannelIndex } from "../tg-agent-autoregistration/persona-template";
 import {
     upsertPrivateInviteLink,
     markPostUpdated,
@@ -115,12 +116,22 @@ export async function runPrivateInviteLinks(
         if (!params.agentIds || params.agentIds.length === 0) {
             throw new Error("agentIds обязателен, если retryPendingOnly не задан");
         }
-        // Шаг 1 — создать ссылки от имени REPORT_AGENT_ID, сохранить под
-        // FUNNEL_ADMIN_AGENT_ID (владелец платформенных данных).
+        // Шаг 1 — создать ссылки от имени REPORT_AGENT_ID (единый админ всех
+        // каналов, Модель A), сохранить под FUNNEL_ADMIN_AGENT_ID (владелец
+        // платформенных данных). Канал резолвится по персоне агента
+        // (per-persona-funnel-channel); агент, персона которого не имеет
+        // funnelPrivateChannelId, помечается пропущенным.
+        const agentChannelIndex = buildAgentFunnelChannelIndex(buildPersonaIndex());
         tg.loadAccount(REPORT_AGENT_ID);
         for (const agentId of params.agentIds) {
+            const channelId = agentChannelIndex.get(agentId) ?? null;
+            if (!channelId) {
+                createErrors[agentId] = "у персоны агента не задан funnelPrivateChannelId";
+                log.warn(`[tg_private_invite_links] skip agent=${agentId}: персона без funnelPrivateChannelId`);
+                continue;
+            }
             try {
-                const { link } = await tg.exportChatInvite(FUNNEL_PRIVATE_CHANNEL_ID, { title: agentId });
+                const { link } = await tg.exportChatInvite(channelId, { title: agentId });
                 upsertPrivateInviteLink(FUNNEL_ADMIN_AGENT_ID, agentId, link, now);
                 created[agentId] = link;
                 log.info(`[tg_private_invite_links] link created for agent=${agentId}: ${link}`);

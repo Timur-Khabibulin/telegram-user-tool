@@ -1,121 +1,139 @@
 // core/write-access.test.ts — юнит-тесты чистой классификации права писать
-// (channel-write-access). Покрывают все ветки перечня причин §3 requirements-v1.md.
+// (channel-write-access-proactive). Покрывают ветки classifyWriteAccess §2.3.
 // Запуск: `node --import tsx --test src/core/write-access.test.ts`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-    isPermanentReason,
-    classifyParticipant,
-    classifySendError,
-    classifyDefaultBannedRights,
-    type SelfParticipantState,
+    classifyWriteAccess,
+    levelOfDetected,
+    SLOWMODE_SUSPEND_DEFAULT_SECONDS,
+    type WriteAccessSnapshot,
+    type DiscussionFlags,
+    type ParticipantSnapshot,
 } from "./write-access";
 
-// Хелпер: строит вариант `participant` с сырым TL-объектом (className-дискриминация)
-// и постоянной величиной группы обсуждения.
-const participantState = (
-    participant: Record<string, unknown>,
-    defaultBannedSendMessages = false,
-): SelfParticipantState => ({ kind: "participant", participant: participant as any, defaultBannedSendMessages });
-
-test("isPermanentReason: постоянные — members_restricted и paid, переменные — нет", () => {
-    assert.equal(isPermanentReason("members_restricted"), true);
-    assert.equal(isPermanentReason("paid"), true);
-    assert.equal(isPermanentReason("account_muted"), false);
-    assert.equal(isPermanentReason("account_kicked"), false);
-    assert.equal(isPermanentReason("not_participant"), false);
-    assert.equal(isPermanentReason("CHAT_WRITE_FORBIDDEN"), false);
+const flags = (over: Partial<DiscussionFlags> = {}): DiscussionFlags => ({
+    left: false,
+    restricted: false,
+    restrictionReason: [],
+    slowmodeEnabled: false,
+    joinToSend: false,
+    joinRequest: false,
+    defaultBannedSendMessages: false,
+    ...over,
 });
 
-test("classifyParticipant: обычный участник, постоянная разрешает → can_write (null)", () => {
-    assert.equal(classifyParticipant(participantState({ className: "ChannelParticipant" })), null);
-    assert.equal(classifyParticipant(participantState({ className: "ChannelParticipantSelf" })), null);
-    assert.equal(classifyParticipant(participantState({ className: "ChannelParticipantAdmin" })), null);
-    assert.equal(classifyParticipant(participantState({ className: "ChannelParticipantCreator" })), null);
+const snap = (participant: ParticipantSnapshot, discussion: Partial<DiscussionFlags> = {}): WriteAccessSnapshot => ({
+    discussion: flags(discussion),
+    participant,
+    slowmodeDefaultSeconds: SLOWMODE_SUSPEND_DEFAULT_SECONDS,
 });
 
-test("classifyParticipant: обычный участник, но постоянная запрещает → members_restricted", () => {
-    const verdict = classifyParticipant(participantState({ className: "ChannelParticipant" }, true));
-    assert.deepEqual(verdict, { reason: "members_restricted", until: null });
+const participant = (tl: Record<string, unknown>): ParticipantSnapshot => ({ kind: "participant", participant: tl as any });
+const okParticipant = participant({ className: "ChannelParticipant" });
+
+test("restricted → suspend бессрочный (channel_restricted), приоритет над участником", () => {
+    const a = classifyWriteAccess(snap({ kind: "not_participant" }, { restricted: true, restrictionReason: [{ platform: "ios", reason: "porn", text: "x" }] }));
+    assert.equal(a.kind, "suspend");
+    if (a.kind === "suspend") {
+        assert.equal(a.durationSeconds, null);
+        assert.equal(a.detected, "channel_restricted");
+        assert.deepEqual(a.details.restrictionReason, [{ platform: "ios", reason: "porn", text: "x" }]);
+    }
 });
 
-test("classifyParticipant: channelParticipantBanned send_messages=true, left=false → account_muted (+until)", () => {
-    const verdict = classifyParticipant(
-        participantState({ className: "ChannelParticipantBanned", left: false, bannedRights: { sendMessages: true, untilDate: 1893456000 } }),
+test("default_banned_rights → suspend бессрочный (members_restricted)", () => {
+    const a = classifyWriteAccess(snap(okParticipant, { defaultBannedSendMessages: true }));
+    assert.equal(a.kind, "suspend");
+    if (a.kind === "suspend") assert.equal(a.detected, "members_restricted");
+});
+
+test("channel.left → авторотация (channel_left)", () => {
+    const a = classifyWriteAccess(snap(okParticipant, { left: true }));
+    assert.equal(a.kind, "autorotate");
+    if (a.kind === "autorotate") assert.equal(a.detected, "channel_left");
+});
+
+test("forbidden (доступ потерян) → авторотация (channel_forbidden)", () => {
+    const a = classifyWriteAccess(snap({ kind: "forbidden" }));
+    assert.equal(a.kind, "autorotate");
+    if (a.kind === "autorotate") assert.equal(a.detected, "channel_forbidden");
+});
+
+test("banned_in_channel → авторотация (participant_banned)", () => {
+    const a = classifyWriteAccess(snap({ kind: "banned_in_channel" }));
+    assert.equal(a.kind, "autorotate");
+    if (a.kind === "autorotate") assert.equal(a.detected, "participant_banned");
+});
+
+test("ChannelParticipantBanned left=true → авторотация с kicked_by/date/banned_rights", () => {
+    const a = classifyWriteAccess(
+        snap(participant({ className: "ChannelParticipantBanned", left: true, kickedBy: 42, date: 111, bannedRights: { sendMessages: true, untilDate: 0 } })),
     );
-    assert.deepEqual(verdict, { reason: "account_muted", until: 1893456000 });
+    assert.equal(a.kind, "autorotate");
+    if (a.kind === "autorotate") {
+        assert.equal(a.detected, "participant_banned");
+        assert.equal(a.details.kickedBy, "42");
+        assert.equal(a.details.date, 111);
+        assert.deepEqual(a.details.bannedRights, { sendMessages: true, untilDate: null });
+    }
 });
 
-test("classifyParticipant: account_muted с untilDate=0 → until=null (бессрочно, справочно)", () => {
-    const verdict = classifyParticipant(
-        participantState({ className: "ChannelParticipantBanned", left: false, bannedRights: { sendMessages: true, untilDate: 0 } }),
-    );
-    assert.deepEqual(verdict, { reason: "account_muted", until: null });
+test("ChannelParticipantBanned send_messages=true, left=false → авторотация", () => {
+    const a = classifyWriteAccess(snap(participant({ className: "ChannelParticipantBanned", left: false, bannedRights: { sendMessages: true, untilDate: 999 } })));
+    assert.equal(a.kind, "autorotate");
+    if (a.kind === "autorotate") assert.deepEqual(a.details.bannedRights, { sendMessages: true, untilDate: 999 });
 });
 
-test("classifyParticipant: channelParticipantBanned left=true → account_kicked", () => {
-    const verdict = classifyParticipant(
-        participantState({ className: "ChannelParticipantBanned", left: true, bannedRights: { sendMessages: true, untilDate: 0 } }),
-    );
-    assert.deepEqual(verdict, { reason: "account_kicked", until: null });
+test("ChannelParticipantBanned без запрета текста → ok (пишем текст)", () => {
+    const a = classifyWriteAccess(snap(participant({ className: "ChannelParticipantBanned", left: false, bannedRights: { sendMessages: false } })));
+    assert.equal(a.kind, "ok");
 });
 
-test("classifyParticipant: бан-запись без запрета текста (send_messages=false) → упирается в постоянную", () => {
-    // Постоянная разрешает — текст отправить можно (R5 бинарно).
-    assert.equal(
-        classifyParticipant(participantState({ className: "ChannelParticipantBanned", left: false, bannedRights: { sendMessages: false } })),
-        null,
-    );
-    // Постоянная запрещает — members_restricted.
-    assert.deepEqual(
-        classifyParticipant(participantState({ className: "ChannelParticipantBanned", left: false, bannedRights: { sendMessages: false } }, true)),
-        { reason: "members_restricted", until: null },
-    );
+test("не участник без цензов → авторотация (participant_left)", () => {
+    const a = classifyWriteAccess(snap({ kind: "not_participant" }));
+    assert.equal(a.kind, "autorotate");
+    if (a.kind === "autorotate") assert.equal(a.detected, "participant_left");
 });
 
-test("classifyParticipant: channelParticipantLeft → not_participant", () => {
-    const verdict = classifyParticipant(participantState({ className: "ChannelParticipantLeft" }));
-    assert.deepEqual(verdict, { reason: "not_participant", until: null });
+test("не участник + join_to_send → вступление (join)", () => {
+    const a = classifyWriteAccess(snap({ kind: "not_participant" }, { joinToSend: true }));
+    assert.equal(a.kind, "join");
+    if (a.kind === "join") assert.equal(a.detected, "join_to_send");
 });
 
-test("classifyParticipant: USER_NOT_PARTICIPANT (kind=not_participant) → not_participant", () => {
-    const verdict = classifyParticipant({ kind: "not_participant" });
-    assert.deepEqual(verdict, { reason: "not_participant", until: null });
+test("не участник + join_request → заявка (приоритет над join_to_send)", () => {
+    const a = classifyWriteAccess(snap({ kind: "not_participant" }, { joinToSend: true, joinRequest: true }));
+    assert.equal(a.kind, "join_request");
+    if (a.kind === "join_request") assert.equal(a.detected, "join_request");
 });
 
-test("classifyParticipant: USER_BANNED_IN_CHANNEL (kind=banned_in_channel) → account_kicked", () => {
-    const verdict = classifyParticipant({ kind: "banned_in_channel" });
-    assert.deepEqual(verdict, { reason: "account_kicked", until: null });
+test("ChannelParticipantLeft → как не участник (авторотация)", () => {
+    const a = classifyWriteAccess(snap(participant({ className: "ChannelParticipantLeft" })));
+    assert.equal(a.kind, "autorotate");
+    if (a.kind === "autorotate") assert.equal(a.detected, "participant_left");
 });
 
-test("classifySendError: голый CHAT_WRITE_FORBIDDEN → CHAT_WRITE_FORBIDDEN (переменная)", () => {
-    assert.equal(classifySendError("chat_write_forbidden"), "CHAT_WRITE_FORBIDDEN");
+test("slow-mode у участника → suspend временный", () => {
+    const a = classifyWriteAccess(snap(okParticipant, { slowmodeEnabled: true }));
+    assert.equal(a.kind, "suspend");
+    if (a.kind === "suspend") {
+        assert.equal(a.detected, "slowmode");
+        assert.equal(a.durationSeconds, SLOWMODE_SUSPEND_DEFAULT_SECONDS);
+    }
 });
 
-test("classifySendError: user_banned_in_channel → account_kicked", () => {
-    assert.equal(classifySendError("user_banned_in_channel"), "account_kicked");
+test("обычный участник без препятствий → ok", () => {
+    assert.equal(classifyWriteAccess(snap(okParticipant)).kind, "ok");
 });
 
-test("classifySendError: allow_payment_required → paid (постоянная)", () => {
-    assert.equal(classifySendError("allow_payment_required"), "paid");
-});
-
-test("classifySendError: PEER_FLOOD (R13) не приписывается каналу → null", () => {
-    assert.equal(classifySendError("peer_flood"), null);
-});
-
-test("classifySendError: прочие теги и отсутствие тега (в т.ч. slowmode — гасится ретраем выше) → null", () => {
-    // SLOWMODE_WAIT (R12) до классификатора не долетает (parseFloodWait ретраит),
-    // формат-запреты и отсутствие тега — не про право записи.
-    assert.equal(classifySendError("chat_send_plain_forbidden"), null);
-    assert.equal(classifySendError("chat_send_media_forbidden"), null);
-    assert.equal(classifySendError("channel_private"), null);
-    assert.equal(classifySendError(null), null);
-});
-
-test("classifyDefaultBannedRights: send_messages=true → members_restricted, иначе null", () => {
-    assert.equal(classifyDefaultBannedRights(true), "members_restricted");
-    assert.equal(classifyDefaultBannedRights(false), null);
+test("levelOfDetected: канальные vs аккаунтные", () => {
+    assert.equal(levelOfDetected("channel_restricted"), "channel");
+    assert.equal(levelOfDetected("members_restricted"), "channel");
+    assert.equal(levelOfDetected("slowmode"), "channel");
+    assert.equal(levelOfDetected("participant_banned"), "account");
+    assert.equal(levelOfDetected("channel_left"), "account");
+    assert.equal(levelOfDetected("participant_left"), "account");
 });

@@ -2,4 +2,4 @@
 
 export { TdataConnectError, TdataSetupError } from "./errors";
 export { readTdataAccountInfo, readAccountPhone, connectBootstrap, readIncomingCode, type TdataAccountInfo } from "./client";
-export { prepareAccount, setupReplacementAccount, createPersonaChannel, type PrepareAccountResult } from "./account-setup";
+export { prepareAccount, prepareEmptyPoolAccount, setupReplacementAccount, createPersonaChannel, type PrepareAccountResult } from "./account-setup";

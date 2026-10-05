@@ -13,16 +13,10 @@ import * as path from "path";
 import type { TelegramClient } from "telegram";
 
 import type { Logger } from "../../core/logger";
-import { accountConfigPath, loadAccountConfig, tdataPath, FUNNEL_ADMIN_AGENT_ID } from "../../core/config";
+import { accountConfigPath, loadAccountConfig, tdataPath, FUNNEL_ADMIN_AGENT_ID, loadAccountDefaults } from "../../core/config";
 import { connectBootstrap, readTdataAccountInfo } from "../../core/tdata";
 import { registerAgenticSession } from "../tg-agent-autoregistration/agentic-session";
-import { templatesDir } from "../tg-agent-autoregistration/persona-template";
 import { clearRestriction } from "../../core/db/agent-restrictions";
-
-/** Шаблон персоны, чей 2FA-пароль пробуется по умолчанию (design.md D3) — единственный
- *  шаблон на платформе на момент этого change; агенты, о которых идёт речь (созданные
- *  до автогенерации), заводились под той же персоной. */
-const DEFAULT_PASSWORD_TEMPLATE = "maria";
 
 export type ReauthFromTdataOutcome =
     | { kind: "done"; accountId: string }
@@ -34,18 +28,18 @@ export type ReauthFromTdataOutcome =
     | { kind: "error"; error: string };
 
 function readDefaultPassword2FA(): string {
-    const p = path.join(templatesDir(DEFAULT_PASSWORD_TEMPLATE), "default_agent_data.json");
-    const data = JSON.parse(fs.readFileSync(p, "utf-8"));
-    return data["2fa"];
+    return loadAccountDefaults()["2fa"];
 }
 
-/** Перезаписывает ТОЛЬКО sessionString в существующем tg-account.json — остальные поля
- *  (accountId, apiId, apiHash, device, proxy) не трогаются (spec: "Only sessionString is
- *  overwritten"). Тот же приём, что Шаг 6 в skills/tg-agent-reauth/SKILL.md. */
+/** Перезаписывает sessionString в существующем tg-account.json (остальные поля
+ *  accountId/apiId/apiHash/device/proxy не трогаются). Вместе с новой сессией
+ *  обязательно проставляет sessionAuthorizedAt = now (tg-peer-identity-model):
+ *  новая авторизация делает недействительными все ранее сохранённые access_hash. */
 function writeSessionString(agentId: string, sessionString: string): void {
     const p = accountConfigPath(agentId);
     const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
     raw.sessionString = sessionString;
+    raw.sessionAuthorizedAt = Math.floor(Date.now() / 1000);
     fs.writeFileSync(p, JSON.stringify(raw, null, 2), "utf-8");
 }
 

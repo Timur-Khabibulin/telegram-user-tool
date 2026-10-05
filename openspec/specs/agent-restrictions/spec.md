@@ -12,7 +12,7 @@ workspace административного агента (`FUNNEL_ADMIN_AGENT_I
 `agentId`: наличие строки означает, что агент ограничен, отсутствие — что
 нет. Поля: `agentId` (PK), `restriction_type` (`banned` |
 `need_update_session` | `suspend` | `manual_reauth`), `reason` (сырой
-`errorMessage` или фиксированная строка — `"channels_banned"` для правила «10
+`errorMessage` или фиксированная строка — `"channels_banned"` для правила «30
 каналов banned за сутки», `"дефолтный 2FA-пароль не подошёл"` для перевода
 свипом реавторизации в `manual_reauth`), `restriction_duration` (секунды;
 `NULL` = бессрочно), `restricted_at` (unix-время создания).
@@ -49,7 +49,7 @@ workspace административного агента (`FUNNEL_ADMIN_AGENT_I
 - `suspend` (триггер 1) — ошибка `PEER_FLOOD`, возникшая при отправке DM или
   ответа в канал; `restriction_duration = 86400` (сутки — явно переопределяет
   дефолт).
-- `suspend` (триггер 2) — у агента минимум 10 каналов со `channels.status =
+- `suspend` (триггер 2) — у агента минимум 30 каналов со `channels.status =
   'banned'`, у каждого `channels.statusUpdatedAt` не ранее 1 суток назад;
   `reason = "channels_banned"`; `restriction_duration = 259200` (3 дня,
   дефолт).
@@ -66,17 +66,17 @@ workspace административного агента (`FUNNEL_ADMIN_AGENT_I
 - **THEN** создаётся `agent_restrictions(restriction_type=suspend,
   restriction_duration=86400)`, текущий прогон немедленно останавливается
 
-#### Scenario: Десятый забаненный канал за сутки создаёт suspend
-- **WHEN** у агента уже есть девять каналов со `status='banned'` и
-  `statusUpdatedAt` в последние сутки, и десятый канал получает
+#### Scenario: Тридцатый забаненный канал за сутки создаёт suspend
+- **WHEN** у агента уже есть двадцать девять каналов со `status='banned'` и
+  `statusUpdatedAt` в последние сутки, и тридцатый канал получает
   `status='banned'` тоже в пределах последних суток
 - **THEN** создаётся `agent_restrictions(restriction_type=suspend,
   reason="channels_banned", restriction_duration=259200)` тем же шагом, что
-  и простановка статуса десятого канала
+  и простановка статуса тридцатого канала
 
-#### Scenario: Менее 10 забаненных каналов не создают suspend
-- **WHEN** у агента менее 10 каналов со `status='banned'` за последние сутки
-- **THEN** `agent_restrictions` не создаётся по правилу «10 каналов за сутки»
+#### Scenario: Менее 30 забаненных каналов не создают suspend
+- **WHEN** у агента менее 30 каналов со `status='banned'` за последние сутки
+- **THEN** `agent_restrictions` не создаётся по правилу «30 каналов за сутки»
 
 ### Requirement: Диспетчер проверяет ограничение перед запуском задач
 

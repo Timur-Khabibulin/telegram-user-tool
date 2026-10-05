@@ -1,136 +1,179 @@
-// core/write-access.ts — классификация права писать в канал (channel-write-access).
+// core/write-access.ts — классификация права писать в канал (проактивная модель).
 //
-// Единственный дом классификации сигнал → причина «писать нельзя» («один факт —
-// один дом»). Без I/O: чистые функции над уже полученными значениями (статус
-// участника, код ошибки отправки, постоянная величина при вступлении), тестируется
-// изолированно (write-access.test.ts).
+// Единственный дом маппинга «статус канала/участника → действие»
+// (channel-write-access-proactive). Без I/O: чистая функция над уже полученным
+// снимком (участник + флаги группы обсуждения), тестируется изолированно
+// (write-access.test.ts). Требования — docs/design/channel-write-access/requirements-v1.md;
+// архитектура — architecture.md §2.
 //
-// Признак «писать нельзя» = `write_access_reason IS NOT NULL` (хранится в channels,
-// отдельно от `status` жизненного цикла — R6). Тип причины (постоянная/переменная)
-// не хранится, а выводится из значения (`isPermanentReason`).
+// Признак «писать нельзя» отдельной колонкой НЕ хранится: действие уводит канал в
+// `status` (`banned`/`suspend`) или в очередь вступления, а гейт отправок/чтения
+// обеспечивается исключением таких каналов из `getChannelsBatch`.
 
 import type { Api } from "telegram";
-import type { TelegramErrorTag } from "./telegram/errors";
 
-/**
- * Перечень причин «писать нельзя» (requirements-v1.md §3). Постоянные
- * (`isPermanentReason`) удерживают канал read-only; переменные ведут к ротации
- * через `status='banned'`. `no_discussion` в тип входит для полноты перечня, но в
- * колонку `channels.write_access_reason` не попадает — фиксируется на уровне
- * `join_queue` (broadcast без группы обсуждения не вступается, строки канала нет).
- */
-export type WriteAccessReason =
-    | "members_restricted"
-    | "no_discussion"
-    | "paid"
-    | "account_muted"
-    | "account_kicked"
-    | "not_participant"
-    | "CHAT_WRITE_FORBIDDEN";
+/** Дефолт длительности временного suspend при slow-mode (нет доп. GetFullChannel, §12.8). */
+export const SLOWMODE_SUSPEND_DEFAULT_SECONDS = 6 * 60 * 60;
 
-/**
- * Постоянные причины — те, что могут оказаться в колонке `write_access_reason` и
- * удерживают канал read-only (§2.1). `no_discussion` сюда не входит: он не пишется
- * в колонку, поэтому `isPermanentReason` на нём никогда не вызывается.
- */
-const PERMANENT_REASONS: ReadonlySet<WriteAccessReason> = new Set<WriteAccessReason>([
-    "members_restricted",
-    "paid",
-]);
-
-/** Постоянная ли причина: удержать read-only (true) или вести в ротацию (false). */
-export function isPermanentReason(reason: WriteAccessReason): boolean {
-    return PERMANENT_REASONS.has(reason);
+/** Причина ограничения канала самим Telegram (`restrictionReason`). */
+export interface RestrictionReasonInfo {
+    platform: string;
+    reason: string;
+    text: string;
 }
 
 /**
- * Нормализованный исход `GetParticipant(self)` в группе обсуждения. `USER_NOT_PARTICIPANT`
- * и `USER_BANNED_IN_CHANNEL` приходят ОШИБКОЙ вызова (а не объектом участника), поэтому
- * tg-слой нормализует их в отдельные kind'ы. Для варианта `participant` дополнительно
- * пробрасывается постоянная величина группы обсуждения (`default_banned_rights.send_messages`)
- * — она приходит в том же ответе бесплатно и уточняет can_write без отдельного вызова.
+ * Флаги группы обсуждения из ответа `GetParticipant` (объект `channel` в `chats`).
+ * Для неучастника флаги недоступны (объекта нет) — заполняются дефолтами (false),
+ * что по §12.5 даёт авторотацию вместо вступления.
  */
-export type SelfParticipantState =
-    | { kind: "participant"; participant: Api.TypeChannelParticipant; defaultBannedSendMessages: boolean }
+export interface DiscussionFlags {
+    left: boolean;
+    restricted: boolean;
+    restrictionReason: RestrictionReasonInfo[];
+    slowmodeEnabled: boolean;
+    joinToSend: boolean;
+    joinRequest: boolean;
+    defaultBannedSendMessages: boolean;
+}
+
+/**
+ * Нормализованный исход `GetParticipant(self)`. `USER_NOT_PARTICIPANT` и
+ * `USER_BANNED_IN_CHANNEL` приходят ОШИБКОЙ вызова (не объектом) — tg-слой
+ * нормализует их в отдельные kind'ы.
+ */
+export type ParticipantSnapshot =
+    | { kind: "participant"; participant: Api.TypeChannelParticipant }
     | { kind: "not_participant" }
-    | { kind: "banned_in_channel" };
+    | { kind: "banned_in_channel" }
+    | { kind: "forbidden" }; // chatForbidden / channelForbidden / CHANNEL_PRIVATE — доступ потерян
 
-/**
- * Результат классификации участника: причина «писать нельзя» + справочный
- * `until` (срок персонального ограничения, только для `account_muted`; для
- * остальных причин null). `null` (не объект) = can_write.
- */
-export interface ParticipantVerdict {
-    reason: WriteAccessReason;
-    until: number | null;
+/** Снимок статусов канала/участника перед отправкой — вход классификатора. */
+export interface WriteAccessSnapshot {
+    discussion: DiscussionFlags;
+    participant: ParticipantSnapshot;
+    slowmodeDefaultSeconds: number;
 }
 
-/** `until_date` из `banned_rights`: 0/отсутствие = бессрочно (null), храним справочно (R11). */
+/** Обнаруженный статус права записи (ключ события журнала). */
+export type DetectedStatus =
+    | "channel_restricted"
+    | "members_restricted"
+    | "channel_left"
+    | "channel_forbidden"
+    | "participant_banned"
+    | "participant_left"
+    | "slowmode"
+    | "join_to_send"
+    | "join_request";
+
+/** Детали препятствия для журнала (payload события `write_access`). */
+export interface WriteAccessDetails {
+    kickedBy?: string;
+    date?: number;
+    bannedRights?: { sendMessages: boolean; untilDate: number | null };
+    restrictionReason?: RestrictionReasonInfo[];
+}
+
+/** Действие по обнаруженному статусу. `ok` = писать можно. */
+export type WriteAccessAction =
+    | { kind: "ok" }
+    | { kind: "autorotate"; detected: DetectedStatus; details: WriteAccessDetails }
+    | { kind: "suspend"; durationSeconds: number | null; detected: DetectedStatus; details: WriteAccessDetails }
+    | { kind: "join"; detected: DetectedStatus; details: WriteAccessDetails }
+    | { kind: "join_request"; detected: DetectedStatus; details: WriteAccessDetails };
+
+/** Уровень статуса: канал (действует для всех) или аккаунт (только наш). */
+export function levelOfDetected(detected: DetectedStatus): "channel" | "account" {
+    switch (detected) {
+        case "channel_restricted":
+        case "members_restricted":
+        case "slowmode":
+        case "join_to_send":
+        case "join_request":
+            return "channel";
+        default:
+            return "account";
+    }
+}
+
+/** `until_date`: 0/отсутствие = бессрочно (null), иначе значение (справочно, R11/R15). */
 function normalizeUntil(untilDate: unknown): number | null {
     return typeof untilDate === "number" && untilDate > 0 ? untilDate : null;
 }
 
-/**
- * Классифицирует живой статус участника в причину «писать нельзя» или `null`
- * (can_write). Разбор конструкторов участника — по `className` (стабильное имя
- * TL-типа GramJS), чтобы модуль оставался без runtime-зависимости от `telegram`.
- * Маппинг §3 requirements-v1.md:
- *   - не участник / `channelParticipantLeft` → `not_participant`;
- *   - `channelParticipantBanned` `left=true` / бан на уровне канала → `account_kicked`;
- *   - `channelParticipantBanned` `send_messages=true`, `left=false` → `account_muted` (+until);
- *   - обычный/self/admin/creator И постоянная величина запрещает → `members_restricted`;
- *   - иначе → `null` (can_write).
- */
-export function classifyParticipant(state: SelfParticipantState): ParticipantVerdict | null {
-    if (state.kind === "not_participant") return { reason: "not_participant", until: null };
-    if (state.kind === "banned_in_channel") return { reason: "account_kicked", until: null };
-
-    const p = state.participant as { className?: string; left?: boolean; bannedRights?: { sendMessages?: boolean; untilDate?: number } };
-
-    if (p.className === "ChannelParticipantLeft") return { reason: "not_participant", until: null };
-
-    if (p.className === "ChannelParticipantBanned") {
-        if (p.left === true) return { reason: "account_kicked", until: null };
-        // Бан-запись без запрета отправки (например, ограничены только медиа) — при
-        // бинарной гранулярности (R5) текст отправить всё ещё можно: падаем ниже к
-        // проверке постоянной величины.
-        if (p.bannedRights?.sendMessages === true) {
-            return { reason: "account_muted", until: normalizeUntil(p.bannedRights.untilDate) };
-        }
-    }
-
-    // Обычный участник / self / admin / creator (или бан без запрета текста): переменная
-    // величина писать разрешает — эффективное право упирается только в постоянную.
-    if (state.defaultBannedSendMessages) return { reason: "members_restricted", until: null };
-    return null;
+/** Действие в ветке «не участник»: заявка > вступление > авторотация (§2.3 шаг 5). */
+function notParticipantAction(d: DiscussionFlags): WriteAccessAction {
+    if (d.joinRequest) return { kind: "join_request", detected: "join_request", details: {} };
+    if (d.joinToSend) return { kind: "join", detected: "join_to_send", details: {} };
+    return { kind: "autorotate", detected: "participant_left", details: {} };
 }
 
 /**
- * Классифицирует код ошибки отправки в причину «писать нельзя» или `null`
- * (сигнал не про право записи — пропускаем). Реактивный резерв (R14): ловит
- * причины, невидимые проактивно (`CHAT_WRITE_FORBIDDEN`, `paid`).
- * `peer_flood` (R13, уровень аккаунта) и все прочие теги (в т.ч. отсутствие тега)
- * → `null`; `SLOWMODE_WAIT` (R12) до сюда не долетает — гасится `parseFloodWait`
- * ретраем выше по потоку.
+ * Классифицирует снимок в ровно одно действие. Порядок разбора (architecture §2.3):
+ * сначала уровень канала (авторотация не поможет), затем уровень аккаунта.
+ *   1. `restricted` (канал ограничен Telegram) → suspend(∞)
+ *   2. `default_banned_rights.send_messages` (все замьючены) → suspend(∞)
+ *   3. `channel.left` (вышли) → авторотация
+ *   4. бан участника (`banned_in_channel`; `ChannelParticipantBanned` с `left=true`
+ *      или `send_messages=true`) → авторотация (+kicked_by/date/banned_rights)
+ *   5. не участник / `ChannelParticipantLeft` → заявка/вступление/авторотация
+ *   6. slow-mode → suspend временный
+ *   7. иначе → ok
  */
-export function classifySendError(tag: TelegramErrorTag | null): WriteAccessReason | null {
-    switch (tag) {
-        case "chat_write_forbidden":
-            return "CHAT_WRITE_FORBIDDEN";
-        case "user_banned_in_channel":
-            return "account_kicked";
-        case "allow_payment_required":
-            return "paid";
-        default:
-            return null;
-    }
-}
+export function classifyWriteAccess(s: WriteAccessSnapshot): WriteAccessAction {
+    const d = s.discussion;
 
-/**
- * Классифицирует постоянную величину права (при вступлении, R3): запрет отправки
- * всем рядовым участникам группы обсуждения (`default_banned_rights.send_messages`)
- * → `members_restricted`, иначе `null` (постоянная величина писать разрешает).
- */
-export function classifyDefaultBannedRights(defaultBannedSendMessages: boolean): WriteAccessReason | null {
-    return defaultBannedSendMessages ? "members_restricted" : null;
+    if (d.restricted) {
+        return { kind: "suspend", durationSeconds: null, detected: "channel_restricted", details: { restrictionReason: d.restrictionReason } };
+    }
+    if (d.defaultBannedSendMessages) {
+        return { kind: "suspend", durationSeconds: null, detected: "members_restricted", details: {} };
+    }
+    if (d.left) {
+        return { kind: "autorotate", detected: "channel_left", details: {} };
+    }
+
+    const p = s.participant;
+    if (p.kind === "forbidden") {
+        return { kind: "autorotate", detected: "channel_forbidden", details: {} };
+    }
+    if (p.kind === "banned_in_channel") {
+        return { kind: "autorotate", detected: "participant_banned", details: {} };
+    }
+    if (p.kind === "not_participant") {
+        return notParticipantAction(d);
+    }
+
+    // p.kind === "participant" — разбор конструктора по стабильному className.
+    const pp = p.participant as {
+        className?: string;
+        left?: boolean;
+        kickedBy?: { toString(): string };
+        date?: number;
+        bannedRights?: { sendMessages?: boolean; untilDate?: number };
+    };
+    if (pp.className === "ChannelParticipantLeft") {
+        return notParticipantAction(d);
+    }
+    if (pp.className === "ChannelParticipantBanned") {
+        const details: WriteAccessDetails = {
+            kickedBy: pp.kickedBy?.toString(),
+            date: pp.date,
+            bannedRights: {
+                sendMessages: pp.bannedRights?.sendMessages === true,
+                untilDate: normalizeUntil(pp.bannedRights?.untilDate),
+            },
+        };
+        if (pp.left === true) return { kind: "autorotate", detected: "participant_banned", details };
+        // Бан без запрета текста (ограничены только медиа) — при бинарной
+        // гранулярности «хотя бы текст» писать можно; падаем ниже.
+        if (pp.bannedRights?.sendMessages === true) return { kind: "autorotate", detected: "participant_banned", details };
+    }
+
+    // Обычный участник / self / admin / creator (или бан без запрета текста).
+    if (d.slowmodeEnabled) {
+        return { kind: "suspend", durationSeconds: s.slowmodeDefaultSeconds, detected: "slowmode", details: {} };
+    }
+    return { kind: "ok" };
 }

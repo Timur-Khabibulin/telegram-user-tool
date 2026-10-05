@@ -66,13 +66,16 @@ export function renderFunnel(r: FunnelResult): string {
     const totActive = r.agents.reduce((s, a) => s + a.channelsActive, 0);
     const totSent = r.agents.reduce((s, a) => s + a.channelsWithSending, 0);
     const totReach = r.agents.reduce((s, a) => s + a.potentialReach, 0);
+    // Заявки в «Итого» — прочерк: итог заявок разнесён по персонам отдельным
+    // блоком под таблицей (per-persona-funnel-channel), единого смешанного числа
+    // по всем персонам не выводим.
     const totalRow = [
         "Итого",
         String(totChannels),
         String(totVisited),
         String(totActive),
         String(totSent),
-        fmtDeltaAbs(r.privateRequestsDelta, r.privateRequestsAbs),
+        "—",
         String(Math.round(totReach)),
     ];
 
@@ -105,15 +108,21 @@ export function renderFunnel(r: FunnelResult): string {
     out.push(...table);
     out.push("```");
     out.push("");
-    if (r.privateNote) {
-        out.push(`Заявки в приватный канал: ${r.privateNote}`);
+    // ── Итог заявок по персонам (per-persona-funnel-channel) ──
+    if (r.privateRequestsByPersona.length > 0) {
+        out.push("Заявки в приватный канал по персонам:");
+        for (const p of [...r.privateRequestsByPersona].sort((a, b) => a.persona.localeCompare(b.persona))) {
+            const value = p.note ? p.note : fmtDeltaAbs(p.delta, p.abs);
+            out.push(`• ${p.persona}: ${value}`);
+        }
+        out.push("");
     }
     out.push(`Просмотры публичных каналов (сумма по агентам): ${fmtDeltaAbs(totViewsDelta, totViewsAbs)}`);
     out.push("");
     out.push("Кан — каналов у агента, Просм — просмотрено за день");
     out.push("Актив — активных каналов");
     out.push("Отпр — каналов с отправкой хотя бы одного сообщения за день; полная разбивка — в CSV");
-    out.push("Заяв — заявки в приватный канал по ссылке агента; «—» — ссылка не настроена");
+    out.push("Заяв — заявки в приватный канал по ссылке агента; «—» — ссылка не настроена или у персоны нет канала");
     out.push("Охват — потенциальный охват (avg_views каналов с ответами)");
     out.push("❌ — banned, ⚠️ — need_update_session/suspend, 🔧 — manual_reauth");
 
@@ -241,8 +250,10 @@ export function buildFunnelCsv(r: FunnelResult): string {
         sumOrEmpty(sumNonNull((a) => a.postViewsAbs)),
         sumOrEmpty(sumNonNull((a) => a.publicSubsDelta)),
         sumOrEmpty(sumNonNull((a) => a.publicSubsAbs)),
-        csvNum(r.privateRequestsDelta),
-        csvNum(r.privateRequestsAbs),
+        // Заявки в «ИТОГО» — пусто: итог разнесён по персонам отдельной таблицей
+        // ниже (per-persona-funnel-channel), единой платформенной суммы нет.
+        "",
+        "",
     ];
 
     const mainTable = [header, ...rows, total].map((row) => row.join(",")).join("\n");
@@ -269,5 +280,17 @@ export function buildFunnelCsv(r: FunnelResult): string {
     const restrictionsRows: string[][] = r.restrictedAgents.map((ra) => [ra.agentId, ra.restrictionType]);
     const restrictionsTable = [restrictionsHeader, ...restrictionsRows].map((row) => row.join(",")).join("\n");
 
-    return `${mainTable}\n\n${breakdownTable}\n\n${restrictionsTable}`;
+    // ── Четвёртая таблица: итог заявок по персонам (per-persona-funnel-channel) ──
+    const personaReqHeader = ["персона", "заявки_дельта", "заявки_абс", "примечание"];
+    const personaReqRows: string[][] = [...r.privateRequestsByPersona]
+        .sort((a, b) => a.persona.localeCompare(b.persona))
+        .map((p) => [
+            p.persona,
+            p.note ? "" : String(p.delta),
+            p.note ? "" : String(p.abs),
+            csvEscapeField(p.note ?? ""),
+        ]);
+    const personaReqTable = [personaReqHeader, ...personaReqRows].map((row) => row.join(",")).join("\n");
+
+    return `${mainTable}\n\n${breakdownTable}\n\n${restrictionsTable}\n\n${personaReqTable}`;
 }

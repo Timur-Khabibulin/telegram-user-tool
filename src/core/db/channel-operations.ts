@@ -20,7 +20,24 @@ import type { Logger } from "../logger";
 export type OperationSource = "operator" | "monitor" | "timer" | "module";
 
 /** Тип операции журнала (R3); расширяем. */
-export type OperationType = "status_change" | "assigned" | "joined";
+export type OperationType = "status_change" | "assigned" | "joined" | "write_access";
+
+/**
+ * Полезная нагрузка события `write_access` (channel-write-access-proactive):
+ * обнаруженный статус права записи, его уровень и применённое действие + поля
+ * препятствия (для `participant_banned` — `kicked_by`/`date`/`banned_rights`; для
+ * `channel_restricted` — `restriction_reason`). Пишется на месте обнаружения
+ * (проактивная проверка перед отправкой ЛИБО реактивный разбор ошибки).
+ */
+export interface WriteAccessEventPayload {
+    status: string;
+    level: "channel" | "account";
+    action: "autorotate" | "suspend" | "suspend_temporary" | "join" | "join_request";
+    kickedBy?: string;
+    date?: number;
+    bannedRights?: { sendMessages: boolean; untilDate: number | null };
+    restrictionReason?: { platform: string; reason: string; text: string }[];
+}
 
 /** Вид учитываемого перехода статуса (белый список R8). */
 export type TransitionKind = "ban" | "suspend" | "suspend_lift" | "leave_banned" | "leave_manual";
@@ -258,6 +275,41 @@ export function recordJoined(
         }
     } catch (err: any) {
         log?.error(`[channel-operations] recordJoined failed — chatId=${params.chatId}: ${err?.message ?? err}`);
+    }
+}
+
+/**
+ * Фиксирует событие `write_access` — обнаруженное препятствие к записи с деталями
+ * (channel-write-access-proactive §5). Best-effort: сбой журнала не роняет
+ * обработку канала. Отдельно от `status_change` («один факт — один дом»): здесь —
+ * «обнаружено препятствие с деталями», там — «статус канала изменился».
+ */
+export function recordWriteAccessEvent(
+    params: {
+        adminAgentId: string;
+        chatId: string;
+        agentId: string;
+        persona?: string | null;
+        source: OperationSource;
+        payload: WriteAccessEventPayload;
+    },
+    log?: Logger,
+): void {
+    try {
+        const db = openDb(params.adminAgentId);
+        try {
+            appendOperation(db, {
+                type: "write_access",
+                chatId: params.chatId,
+                persona: params.persona ?? null,
+                source: params.source,
+                attrs: { agentId: params.agentId, ...params.payload },
+            });
+        } finally {
+            db.close();
+        }
+    } catch (err: any) {
+        log?.error(`[channel-operations] recordWriteAccessEvent failed — chatId=${params.chatId}: ${err?.message ?? err}`);
     }
 }
 
