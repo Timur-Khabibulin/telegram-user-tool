@@ -1,37 +1,31 @@
 // features/banned-account-replacement/run.ts — суточный кросс-агентный sweep
-// авто-замены забаненных аккаунтов из пула пустых (banned-account-replacement).
+// авто-замены забаненных аккаунтов из РЕЗЕРВА готовых аккаунтов персоны
+// (persona-account-reserve §7). Источник замены — резерв той же персоны, что у
+// забаненного агента (не обезличенный пул): аккаунт резерва уже полностью настроен
+// (персона + публичный канал + инвайт-ссылка + агентская сессия), поэтому активация
+// персону НЕ применяет и канал НЕ создаёт — только файловая подмена + финализация.
 //
-// Прогон совмещает две фазы (architecture §3.1.1): (1) исполнение назревших
-// отложенных переходов жизненного цикла; (2) замена всем агентам с активным
-// ограничением `banned` (включая заморозку). Последовательно, с per-agent
-// изоляцией сбоёв — как agent-reauth-sweep. Файловая часть подмены — в swap.ts.
+// Прогон совмещает две фазы (architecture §3.1.1): (1) исполнение назревших отложенных
+// переходов жизненного цикла; (2) замена всем агентам с активным `banned`. Файловая
+// часть подмены — в swap.ts (без изменений), общая финализация — в
+// features/persona-account-reserve/activate.ts.
 
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
 import type { Logger } from "../../core/logger";
-import {
-    REPORT_AGENT_ID,
-    listPoolAccountIds,
-    loadAccountConfig,
-    accountConfigPath,
-} from "../../core/config";
-import { listPoolAccountsOldestFirst, quarantinePoolAccount, generateUsername } from "../../core/pool-accounts";
-import { applyPersonaToAccount } from "../persona-apply/apply-persona";
+import { REPORT_AGENT_ID, loadAccountConfig } from "../../core/config";
+import { findValidReserveAccount } from "../../core/reserve-accounts";
+import { finalizeActivation } from "../persona-account-reserve/activate";
 import { listActiveByType, clearRestriction } from "../../core/db/agent-restrictions";
 import {
     listDueTransitions,
     markTransitionDone,
-    seedTransitions,
     type LifecycleAction,
 } from "../../core/db/lifecycle-transitions";
-import { listAgentAssignmentLinks } from "../../core/db/discovery";
-import { addJoinQueue } from "../../core/db/join-queue";
 import { createOrUpdateTask, removeTask } from "../../core/scheduler-control";
 import { TelegramService } from "../../core/telegram/service";
-import { classifyAccountError } from "../../core/telegram/errors";
-import { loadPersonaTemplate } from "../tg-agent-autoregistration/persona-template";
 import {
     buildIncoming,
     claimPoolAccount,
@@ -41,33 +35,23 @@ import {
     recoverAnchors,
 } from "./swap";
 
-const DAY_SEC = 86400;
-
-/** Durable-флаг «пул пуст, оператор оповещён» (M6) — файл в ~/.openclaw/banned-replacement. */
-function alertFlagPath(): string {
-    return path.join(os.homedir(), ".openclaw", "banned-replacement", "pool-empty-alerted");
-}
-
-/** Записывает сгенерированный username в tg-account.json агента (пул обезличен). */
-function persistUsername(agentId: string, username: string): void {
-    const p = accountConfigPath(agentId);
-    const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
-    raw.username = username;
-    fs.writeFileSync(p, JSON.stringify(raw, null, 2), "utf-8");
+/** Durable-флаг «резерв персоны пуст, оператор оповещён» (R20) — пер-персонный файл. */
+function alertFlagPath(persona: string): string {
+    return path.join(os.homedir(), ".openclaw", "banned-replacement", `reserve-empty-alerted-${persona}`);
 }
 
 export interface BannedReplacementSummary {
     /** Всего агентов с активным banned в выборке. */
     total: number;
-    /** Успешно заменены (аккаунт подставлен, активирован, banned снят). */
+    /** Успешно заменены (аккаунт резерва подставлен, активирован, banned снят). */
     replaced: number;
-    /** Пропущены из-за отсутствия пригодного пул-аккаунта (остались banned). */
+    /** Пропущены из-за отсутствия пригодного аккаунта резерва персоны (остались banned). */
     poolExhausted: number;
     /** Сбой замены (изолирован, агент остался banned). */
     failed: number;
     /** Исполнено назревших отложенных переходов. */
     transitionsApplied: number;
-    /** Отправлен ли алерт «пул пуст» в этом прогоне. */
+    /** Отправлен ли хотя бы один пер-персонный алерт «резерв пуст» в этом прогоне. */
     poolEmptyAlerted: boolean;
 }
 
@@ -79,23 +63,32 @@ export async function runBannedReplacementSweep(log: Logger, adminAgentId: strin
     // ── Фаза 1: назревшие отложенные переходы жизненного цикла ──────────
     summary.transitionsApplied = await applyDueTransitions(adminAgentId, log);
 
-    // ── Фаза 2: замена забаненных ───────────────────────────────────────
+    // ── Фаза 2: замена забаненных из резерва персоны ────────────────────
     const banned = listActiveByType(adminAgentId, "banned");
     summary.total = banned.length;
     log.info(`[banned-replacement] start — ${banned.length} agent(s) with banned`);
 
-    // Пул непуст на старте → снять флаг алерта (пополнили — оповестить снова можно).
-    if (listPoolAccountIds().length > 0) clearAlertFlag(log);
+    // Персоны, чей резерв оказался пуст в этом прогоне (для пер-персонного алерта R20).
+    const exhaustedPersonas = new Set<string>();
 
-    let poolExhausted = false;
     for (const row of banned) {
         const agentId = row.agentId;
+        // Персона читается до замены (нужна для пер-персонного флага алерта и сброса).
+        let persona: string | undefined;
+        try {
+            persona = loadAccountConfig(agentId).persona;
+        } catch (err: any) {
+            log.warn(`[banned-replacement] ${agentId}: не удалось прочитать персону — ${err?.message ?? err}`);
+        }
         try {
             const outcome = await replaceOne(agentId, adminAgentId, log);
-            if (outcome === "replaced") summary.replaced++;
-            else if (outcome === "pool_exhausted") {
+            if (outcome === "replaced") {
+                summary.replaced++;
+                // Резерв персоны оказался непуст (аккаунт нашёлся) — сброс флага алерта (R20).
+                if (persona) clearAlertFlag(persona, log);
+            } else {
                 summary.poolExhausted++;
-                poolExhausted = true;
+                if (persona) exhaustedPersonas.add(persona);
             }
         } catch (err: any) {
             summary.failed++;
@@ -103,16 +96,18 @@ export async function runBannedReplacementSweep(log: Logger, adminAgentId: strin
         }
     }
 
-    // Алерт «пул пуст» — один раз, пока не пополнят (M5/M6).
-    if (poolExhausted && !alertAlreadySent()) {
-        await sendPoolEmptyAlert(log);
-        setAlertFlag(log);
-        summary.poolEmptyAlerted = true;
+    // Пер-персонный алерт «резерв пуст» — один раз на персону, пока резерв не пополнят (R20).
+    for (const persona of exhaustedPersonas) {
+        if (!alertAlreadySent(persona)) {
+            await sendReserveEmptyAlert(persona, log);
+            setAlertFlag(persona, log);
+            summary.poolEmptyAlerted = true;
+        }
     }
 
     log.info(
         `[banned-replacement] done — total=${summary.total} replaced=${summary.replaced} ` +
-            `pool_exhausted=${summary.poolExhausted} failed=${summary.failed} ` +
+            `reserve_exhausted=${summary.poolExhausted} failed=${summary.failed} ` +
             `transitions=${summary.transitionsApplied} alert=${summary.poolEmptyAlerted}`,
     );
     return summary;
@@ -156,143 +151,85 @@ type ReplaceOutcome = "replaced" | "pool_exhausted";
 
 async function replaceOne(agentId: string, adminAgentId: string, log: Logger): Promise<ReplaceOutcome> {
     // Восстановление незавершённой замены: доиграть swap по якорям, затем — если есть
-    // фазовый маркер — активация уже на подменённом аккаунте, без нового забора пула.
+    // фазовый маркер — доиграть финализацию уже на подменённом аккаунте, без нового забора.
     recoverAnchors(agentId, log);
-    if (readMarker(agentId)) {
-        log.info(`[banned-replacement] ${agentId}: обнаружен незавершённый setup — доигрываю активацию без забора пула`);
-        await activateAndFinalize(agentId, adminAgentId, log);
+    const marker = readMarker(agentId);
+    if (marker) {
+        log.info(`[banned-replacement] ${agentId}: обнаружен незавершённый setup — доигрываю финализацию без забора резерва`);
+        // marker.poolId — id аккаунта резерва (поле swap.ts не переименовано).
+        await finalizeActivation(agentId, marker.poolId, adminAgentId, log);
+        clearMarker(agentId, log);
+        clearRestriction(adminAgentId, agentId);
+        log.info(`[banned-replacement] ${agentId}: замена завершена (резюмирование) — banned снят`);
         return "replaced";
     }
 
     // Персона заменяемого агента читается ДО любой подмены (Модель B — сохраняем её).
     const persona = loadAccountConfig(agentId).persona;
 
-    // Выбрать пригодный пул-аккаунт (невалидный → карантин, берём следующий).
-    const poolId = await findValidPoolAccount(log);
-    if (!poolId) {
-        log.warn(`[banned-replacement] ${agentId}: нет пригодного пул-аккаунта — остаётся banned`);
-        return "pool_exhausted";
-    }
-
-    // Claim (атомарный rename), сборка, swap.
-    if (!claimPoolAccount(poolId, agentId, log)) {
-        log.warn(`[banned-replacement] ${agentId}: пул-аккаунт ${poolId} исчез при заборе — пропуск, ретрай след. прогоном`);
-        return "pool_exhausted";
-    }
-    buildIncoming(agentId, poolId, persona, log);
-    commitSwap(agentId, log);
-
-    // Активация под персону + финализация (снятие banned — последним).
-    await activateAndFinalize(agentId, adminAgentId, log);
-    return "replaced";
-}
-
-/**
- * Настройка нового аккаунта под персону (R8/M3), посев T0-расписания и отложенных
- * переходов (R9–R11), снятие маркера и ограничения `banned` (commit point, R7).
- * Идемпотентна: повтор после сбоя доигрывает без нового забора пула.
- */
-async function activateAndFinalize(agentId: string, adminAgentId: string, log: Logger): Promise<void> {
-    const cfg = loadAccountConfig(agentId);
-
-    // Пул-аккаунт обезличен (без username) — username персоны генерируется здесь и
-    // персистится в tg-account.json (идемпотентность: повтор активации переиспользует
-    // уже записанный, не генерирует другой поверх применённого к Telegram-аккаунту).
-    let username = cfg.username;
-    if (!username) {
-        const template = loadPersonaTemplate(cfg.persona, true);
-        username = generateUsername(template.profileData.nick);
-        persistUsername(agentId, username);
-    }
-
-    // 1–2. Применить персону сессией агента + инвайт-ссылка (общий шаг с фазой 2).
-    // connectId == agentId: аккаунт уже в workspace-<agentId> после commitSwap.
-    await applyPersonaToAccount(agentId, agentId, cfg.persona, username, log);
-
-    // 3. T0-конфигурация: warmup on; join-queue наполнена из реестра (старт отложен).
-    await createOrUpdateTask({ agentId, type: "account-warmup" }, log);
-    const links = listAgentAssignmentLinks(adminAgentId, agentId);
-    if (links.length > 0) {
-        const res = addJoinQueue(agentId, links, log);
-        log.info(`[banned-replacement] ${agentId}: join-queue наполнена — added=${res.added} skipped=${res.skipped}`);
-    } else {
-        log.info(`[banned-replacement] ${agentId}: за агентом нет закреплённых каналов — join-queue пуста`);
-    }
-
-    // 4. Отложенные переходы: старт join-queue T0+1д; monitor-v5 on + warmup off T0+3д.
-    const now = Math.floor(Date.now() / 1000);
-    seedTransitions(adminAgentId, agentId, [
-        { action: "start_join_queue", runAt: now + DAY_SEC },
-        { action: "enable_monitor_v5", runAt: now + 3 * DAY_SEC },
-        { action: "disable_warmup", runAt: now + 3 * DAY_SEC },
-    ]);
-
-    // 5. Commit point: снять маркер, затем ограничение `banned` (последним — R7).
-    clearMarker(agentId, log);
-    clearRestriction(adminAgentId, agentId);
-    log.info(`[banned-replacement] ${agentId}: замена завершена — banned снят, агент в прогреве`);
-}
-
-/**
- * Первый пригодный пул-аккаунт (подключение его сессией + getMe). Аккаунт с
- * аккаунтной ошибкой (banned/невалидная сессия) уводится в карантин (M2); прочие
- * ошибки (прокси/сеть) — пропуск без карантина (аккаунт останется в пуле на след. раз).
- */
-async function findValidPoolAccount(log: Logger): Promise<string | null> {
-    for (const poolId of listPoolAccountsOldestFirst()) {
-        const tg = new TelegramService(log);
-        try {
-            tg.loadAccount(poolId, { pool: true });
-            await tg.withActiveClient((client) => client.getMe());
-            log.info(`[banned-replacement] пул-аккаунт ${poolId} валиден — берём`);
-            return poolId;
-        } catch (err: any) {
-            const accountFailure = classifyAccountError(err);
-            if (accountFailure) {
-                log.warn(`[banned-replacement] пул-аккаунт ${poolId} непригоден (${accountFailure}) — карантин`);
-                quarantinePoolAccount(poolId);
-            } else {
-                log.warn(`[banned-replacement] пул-аккаунт ${poolId}: ошибка подключения (${err?.message ?? err}) — пропуск, остаётся в пуле`);
-            }
-        } finally {
-            await tg.disconnectAgent(poolId).catch(() => {});
+    // Взять пригодный аккаунт резерва ТОЙ ЖЕ персоны; при гонке на заборе — добрать следующий (R16).
+    while (true) {
+        const reserveId = await findValidReserveAccount(persona, log);
+        if (!reserveId) {
+            log.warn(`[banned-replacement] ${agentId}: в резерве нет пригодного аккаунта персоны ${persona} — остаётся banned`);
+            return "pool_exhausted";
         }
+        // Claim (атомарный rename). ENOENT → другой процесс забрал — добрать следующий пригодный.
+        if (!claimPoolAccount(reserveId, agentId, log)) {
+            log.warn(`[banned-replacement] ${agentId}: аккаунт резерва ${reserveId} исчез при заборе — добираю следующий`);
+            continue;
+        }
+
+        // Файловая подмена. username аккаунта резерва НЕ регенерируется — он соответствует
+        // уже созданному публичному каналу (buildIncoming username не перезаписывает, §7.5).
+        buildIncoming(agentId, reserveId, persona, log);
+        commitSwap(agentId, log);
+
+        // Финализация (перекей инвайт-записи reserveId → agentId, прогрев, переходы) —
+        // БЕЗ применения персоны и создания канала (аккаунт резерва уже настроен, R13).
+        await finalizeActivation(agentId, reserveId, adminAgentId, log);
+
+        // Commit point: снять маркер, затем ограничение `banned` (последним — R7 замены).
+        clearMarker(agentId, log);
+        clearRestriction(adminAgentId, agentId);
+        log.info(`[banned-replacement] ${agentId}: замена завершена — banned снят, агент в прогреве`);
+        return "replaced";
     }
-    return null;
 }
 
-// ─── Алерт «пул пуст» с дедупликацией (M5/M6) ────────────────────────────
+// ─── Пер-персонный алерт «резерв пуст» с дедупликацией (R20) ──────────────
 
-function alertAlreadySent(): boolean {
-    return fs.existsSync(alertFlagPath());
+function alertAlreadySent(persona: string): boolean {
+    return fs.existsSync(alertFlagPath(persona));
 }
 
-function setAlertFlag(log: Logger): void {
+function setAlertFlag(persona: string, log: Logger): void {
     try {
-        fs.mkdirSync(path.dirname(alertFlagPath()), { recursive: true });
-        fs.writeFileSync(alertFlagPath(), String(Math.floor(Date.now() / 1000)), "utf-8");
+        fs.mkdirSync(path.dirname(alertFlagPath(persona)), { recursive: true });
+        fs.writeFileSync(alertFlagPath(persona), String(Math.floor(Date.now() / 1000)), "utf-8");
     } catch (err: any) {
-        log.warn(`[banned-replacement] не удалось поставить флаг алерта — ${err?.message ?? err}`);
+        log.warn(`[banned-replacement] не удалось поставить флаг алерта (${persona}) — ${err?.message ?? err}`);
     }
 }
 
-function clearAlertFlag(log: Logger): void {
+function clearAlertFlag(persona: string, log: Logger): void {
     try {
-        fs.rmSync(alertFlagPath(), { force: true });
+        fs.rmSync(alertFlagPath(persona), { force: true });
     } catch (err: any) {
-        log.warn(`[banned-replacement] не удалось снять флаг алерта — ${err?.message ?? err}`);
+        log.warn(`[banned-replacement] не удалось снять флаг алерта (${persona}) — ${err?.message ?? err}`);
     }
 }
 
-async function sendPoolEmptyAlert(log: Logger): Promise<void> {
+async function sendReserveEmptyAlert(persona: string, log: Logger): Promise<void> {
     const text =
-        "⚠️ banned-account-replacement: пул пустых аккаунтов исчерпан — есть забаненные агенты, " +
-        "заменить некем. Пополните пул (workspace-emptyAccount*). Оповещение не повторится до пополнения.";
+        `⚠️ banned-account-replacement: в резерве нет готового аккаунта персоны ${persona} — ` +
+        `есть забаненный агент этой персоны, заменить некем. Пополните резерв персоны ${persona} ` +
+        `(tg-agent-reserve-provision). Оповещение не повторится до пополнения.`;
     const tg = new TelegramService(log);
     try {
         tg.loadAccount(REPORT_AGENT_ID);
         await tg.sendSavedMessage(text);
-        log.warn("[banned-replacement] отправлен алерт «пул пуст» в Saved Messages report-агента");
+        log.warn(`[banned-replacement] отправлен алерт «резерв персоны ${persona} пуст» в Saved Messages report-агента`);
     } finally {
         await tg.disconnectAgent(REPORT_AGENT_ID).catch(() => {});
     }

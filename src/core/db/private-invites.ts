@@ -66,6 +66,37 @@ export function upsertPrivateInviteLink(adminAgentId: string, agentId: string, i
     }
 }
 
+/**
+ * Переносит строку реестра с ключа `fromAgentId` на `toAgentId` БЕЗ вызовов Telegram
+ * (persona-account-reserve §6.4): сохраняет `invite_link`/`created_at`/`post_updated`,
+ * меняет только `agent_id`. Нужен активации аккаунта резерва — ссылка создана при
+ * провиженинге под ключом reserveId, URL ведёт в общий приватный канал воронки и от
+ * конкретного аккаунта не зависит; активация лишь перекеивает запись на финальный agentId.
+ *
+ * Если строки `fromAgentId` нет — no-op. Если строка `toAgentId` уже есть (триггер 1,
+ * у заменяемого агента осталась прежняя запись) — она перезаписывается: сначала
+ * удаляется, затем ключ переносится. Всё в одной транзакции.
+ */
+export function rekeyPrivateInviteLink(adminAgentId: string, fromAgentId: string, toAgentId: string): void {
+    if (fromAgentId === toAgentId) return;
+    const db = openDb(adminAgentId);
+    try {
+        db.transaction(() => {
+            const src = db.prepare(
+                `SELECT invite_link AS inviteLink, created_at AS createdAt, post_updated AS postUpdated
+                 FROM private_invite_links WHERE agent_id = @fromAgentId`,
+            ).get({ fromAgentId }) as { inviteLink: string; createdAt: number; postUpdated: number } | undefined;
+            if (!src) return;
+            // Перезаписать возможную прежнюю запись цели, затем сменить ключ источника.
+            db.prepare(`DELETE FROM private_invite_links WHERE agent_id = @toAgentId`).run({ toAgentId });
+            db.prepare(`UPDATE private_invite_links SET agent_id = @toAgentId WHERE agent_id = @fromAgentId`)
+                .run({ fromAgentId, toAgentId });
+        })();
+    } finally {
+        db.close();
+    }
+}
+
 /** Ссылка агента из реестра или null, если её ещё нет (для переиспользования без пересоздания). */
 export function getPrivateInviteLink(adminAgentId: string, agentId: string): string | null {
     const db = openDb(adminAgentId);

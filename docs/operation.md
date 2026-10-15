@@ -59,6 +59,9 @@
 | `~/.openclaw/personas/<personName>/` | общие шаблоны персон (`SOUL.md` и др.) — см. ниже |
 | `~/.openclaw/account-defaults/` | общая заготовка учётных данных (`apiId`/`apiHash`/`2fa`), вынесены из персоны — читает только фаза 1 (tg-agent-pool-provision), см. [configuration.md](configuration.md) |
 | `~/.openclaw/tg-agent-pool-provisioning/staging/emptyAccount<K>/` | стейджинг продюсера пула (фаза 1) до промоушена в `workspace-emptyAccount<K>` |
+| `~/.openclaw/workspace-reserve-<persona>-<K>/` | аккаунт резерва (готов под персону, с публичным каналом и инвайт-ссылкой; невидим рабочему контуру за счёт префикса, без прогрева/задач до активации) |
+| `~/.openclaw/tg-agent-reserve-provisioning/staging/<reserveId>/` | стейджинг провижена-в-резерв (третий путь) до промоушена в `workspace-reserve-<persona>-<K>` |
+| `~/.openclaw/banned-replacement/reserve-empty-alerted-<persona>` | флаг разового алерта «в резерве нет аккаунта персоны <persona>» (сброс при непустом резерве персоны) |
 | `~/.openclaw/codex-auth/` | OAuth-токен ChatGPT (`auth.json`) — primary LLM (codex-подписка), см. [configuration.md](configuration.md) |
 | `~/.openclaw/secrets.env` | секреты сервисов, включая `DEEPSEEK_API_KEY` (fallback LLM) |
 
@@ -93,6 +96,10 @@ ops-скрипта, отчёт по завершении шлётся туда �
   `done`/`proxy_failed`/`setup_failed`/`needs_manual_code`;
 - развёртывание агентов под персону из пула, фаза 2 (`tg-agent-persona-deploy`) —
   per-account `done`/`setup_failed`/`account_invalid` + итог «запрошено M, создано X»;
+- провижен-в-резерв, третий путь (`tg-agent-reserve-provision`) — per-account статус
+  `done`/`proxy_failed`/`setup_failed`/`needs_manual_code`;
+- ручная активация аккаунта резерва (`tg-agent-reserve-activate`) — статус прогона
+  `done`/`account_invalid`/`skip`/`taken`;
 - массовая автрегистрация (`tg-agent-autoregistration`, **DEPRECATED** — заменена
   фазами 1+2) — per-account статус;
 - реавторизация через tdata (`tg-agent-reauth-from-tdata`) — терминальный статус прогона;
@@ -108,6 +115,16 @@ ops-скрипта, отчёт по завершении шлётся туда �
 (banned-account-replacement) — оба берут старейший пригодный аккаунт атомарным
 забором. Карантин невалидного пул-аккаунта — суффикс `.invalid`; транзиентный каталог
 нового агента при промоушене фазы 2 — `workspace-agent<N>.incoming` (тоже невидим).
+
+Резерв готовых аккаунтов (`workspace-reserve-<persona>-<K>`, пер-персонная нумерация)
+так же невидим рабочему контуру за счёт префикса и перечисляется отдельно
+(`src/core/reserve-accounts.ts`): аккаунт уже полностью настроен под персону, с публичным
+каналом и постом, но без прогрева и задач до активации. Резерв **производит** третий путь
+подготовки — провижен-в-резерв (`tg-agent-reserve-provision`), а **потребляют** два
+триггера активации: ручной скилл `tg-agent-reserve-activate` и свип авто-замены банов
+(banned-account-replacement) — оба берут из резерва аккаунт той же персоны и выполняют
+claim в `workspace-agent<N>` (канал при активации не создаётся и не трогается). Карантин и
+транзиентный каталог — те же суффиксы `.invalid`/`.incoming`.
 
 ### Персона `~/.openclaw/personas/<personName>/`
 
@@ -140,7 +157,7 @@ workspace агента. Правка `SOUL.md` шаблона применяет
 | `tg-channel-activity-update.service/.timer` | oneshot/timer | `03:00 UTC` (ежедневно) | пересчёт охвата канала (avg_views/subs_count) и активности чата (active_writers_p50/p90) — TTL 30 дней на канал по каждой группе метрик независимо |
 | `tg-channel-rotation.service/.timer` | oneshot/timer | `07:00 UTC` (ежедневно) | ротация каналов, покинутых из-за бана (`leaved_from_banned`) — перенос менее загруженному активному агенту |
 | `tg-reauth-sweep.service/.timer` | oneshot/timer | `09:00 UTC` (ежедневно) | авто-реавторизация агентов с `need_update_session` через tdata: успех — ограничение снято; нет tdata / не подошёл 2FA — `manual_reauth`; ошибка-бан — `banned`; транзиентные — ретрай след. прогоном. Наблюдаемость — только journal |
-| `tg-banned-replacement-sweep.service/.timer` | oneshot/timer | `11:00 UTC` (ежедневно) | авто-замена забаненных аккаунтов из пула пустых (banned-account-replacement): каждому агенту с активным `banned` подставляется пустой аккаунт из `workspace-emptyAccount*` (agentId и персона сохраняются), новый аккаунт настраивается под персону, включается прогрев, join-queue наполняется из реестра владения (старт +1д), на +3д — monitor-v5 on / warmup off. Тот же прогон исполняет назревшие отложенные переходы. Пул пуст → алерт один раз в Saved Messages report-агента. Наблюдаемость — journal |
+| `tg-banned-replacement-sweep.service/.timer` | oneshot/timer | `11:00 UTC` (ежедневно) | авто-замена забаненных аккаунтов из резерва (banned-account-replacement): каждому агенту с активным `banned` подставляется готовый аккаунт резерва той же персоны (`workspace-reserve-<persona>-*`, agentId и персона сохраняются); канал повторно не создаётся, персона к каналу не применяется; запись реестра инвайт-ссылок перекеивается на agentId. Включается прогрев, join-queue наполняется из реестра владения (старт +1д), на +3д — monitor-v5 on / warmup off. При непригодном аккаунте — добор следующего той же персоны. Тот же прогон исполняет назревшие отложенные переходы. Резерв персоны пуст → агент остаётся `banned`, без фолбэка на обезличенный пул + разовый пер-персонный алерт в Saved Messages report-агента (флаг `reserve-empty-alerted-<persona>`). Наблюдаемость — journal |
 | `tg-review-listener.service` | simple, `Restart=always` | — (постоянно работает) | ручное ревью комментариев: единственный потребитель `getUpdates` общего Bot API-бота (post-comment-review), не по таймеру |
 | `tg-distribution-listener.service` | simple, `Restart=always` | — (постоянно работает) | распределение каналов по агентам через Telegram-бот (channel-distribution): приём CSV, балансировка, постановка в join-queue; отдельный bot-токен, не по таймеру. Загруженные файлы — в `~/.openclaw/workspace-agent1/distribution-uploads/`, история прогонов — `channel-distribution.db`, журнал — journald. **Также ведёт конвейер метрик** (channel-metrics-pipeline): команды `/metrics` (CSV ссылок + `agents:` и `filter:` в подписи одним сообщением) и `/metrics_status`. Тяжёлый расчёт идёт отдельным detached-процессом `src/scripts/ops/metrics-pipeline-worker.ts` (наследует окружение слушателя, в т.ч. `GOOGLE_SHEETS_*`): дедуп против Google-листа → все метрики волнами по пулу агентов → фильтр → запись в лист → CSV прошедших в чат. Файлы прогона — `~/.openclaw/workspace-agent1/channel-metrics-pipeline/`, задачи — `channel-metrics-pipeline.db` |
 

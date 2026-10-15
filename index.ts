@@ -74,6 +74,8 @@ import { runAutoregistration, retryManualCode, renderReport as renderAutoregistr
 import { runChannelSetup, renderChannelSetupReport } from "./src/features/tg-agent-channel-setup/run";
 import { runPoolProvision, retryPoolManualCode, renderReport as renderPoolProvisionReport } from "./src/features/tg-agent-pool-provision/run";
 import { runPersonaDeploy, renderReport as renderPersonaDeployReport } from "./src/features/tg-agent-persona-deploy/run";
+import { runReserveProvision, retryReserveManualCode, renderReport as renderReserveProvisionReport } from "./src/features/tg-agent-reserve-provision/run";
+import { runReserveActivate, renderActivateResult } from "./src/features/persona-account-reserve/activate";
 import { reauthFromTdata } from "./src/features/tg-agent-reauth-from-tdata/run";
 
 // ─── OpenClaw result helpers ──────────────────────────────────────────
@@ -1520,6 +1522,82 @@ export default definePluginEntry({
                 run("tg_agent_persona_deploy_run", async () => {
                     const report = await runPersonaDeploy(params, log);
                     return { text: renderPersonaDeployReport(report), results: report.results, abortReason: report.abortReason };
+                }),
+        });
+
+        // ── tg_agent_reserve_provision_run (третий путь — provision-в-резерв) ──
+
+        reg({
+            name: "tg_agent_reserve_provision_run",
+            description:
+                "Третий путь подготовки: из готовых tdata-сессий делает ПОЛНОСТЬЮ настроенные под " +
+                "персону аккаунты и складывает их в резерв workspace-reserve-<persona>-<K> (запас " +
+                "впрок), невидимый рабочему контуру. По каждому аккаунту: подбор прокси → bootstrap из " +
+                "tdata → гигиена (удаление унаследованных каналов, смена 2FA, сброс чужих сессий) → " +
+                "профиль/username/фото → публичный канал персоны с постом и УЖЕ вставленной персональной " +
+                "инвайт-ссылкой в приватный канал воронки → регистрация агентской сессии. В отличие от " +
+                "фазы 2 канал создаётся в один прогон на свежем аккаунте (обход USER_RESTRICTED). Для " +
+                "длинных пачек запускать detached через ops-скрипт (см. skills/tg-agent-reserve-provision). " +
+                "Статус по каждому: done / proxy_failed / setup_failed / needs_manual_code.",
+            parameters: Type.Object({
+                personName: Type.String({ description: "Имя персоны — шаблон в ~/.openclaw/personas/<personName>/ (канальные файлы обязательны)" }),
+                links: Type.Array(Type.String(), { description: "Ссылки на tdata-архивы (Mega folder-share или Google Drive file-ссылка), одна на аккаунт" }),
+                twoFaPassword: Type.Optional(Type.String({ description: "Текущий 2FA-пароль аккаунтов пачки (один на весь прогон). Не передавать, если 2FA на аккаунтах пачки нет" })),
+                proxyRegion: Type.String({ description: "Регион мобильного прокси для asocks" }),
+                maxProxyAttempts: Type.Number({ description: "Максимум попыток подбора прокси на аккаунт" }),
+            }),
+            execute: (
+                _id: string,
+                params: { personName: string; links: string[]; twoFaPassword?: string; proxyRegion: string; maxProxyAttempts: number },
+            ) =>
+                run("tg_agent_reserve_provision_run", async () => {
+                    const report = await runReserveProvision(params, log);
+                    return { text: renderReserveProvisionReport(report), results: report.results, abortReason: report.abortReason };
+                }),
+        });
+
+        // ── tg_agent_reserve_provision_retry_code ────────────────────────
+
+        reg({
+            name: "tg_agent_reserve_provision_retry_code",
+            description:
+                "Повторяет только регистрацию второй (агентской) сессии для аккаунта резерва, застрявшего " +
+                "в статусе needs_manual_code после tg_agent_reserve_provision_run — БЕЗ повторной гигиены и " +
+                "без повторного создания канала/инвайт-ссылки (уже применены). Требует, чтобы запись в " +
+                "стейджинге всё ещё была needs_manual_code.",
+            parameters: Type.Object({
+                reserveId: Type.String({ description: "id аккаунта резерва в стейджинге, например reserve-maria-3" }),
+                proxyRegion: Type.String({ description: "Регион мобильного прокси для asocks" }),
+                maxProxyAttempts: Type.Number({ description: "Максимум попыток подбора прокси" }),
+            }),
+            execute: (
+                _id: string,
+                params: { reserveId: string; proxyRegion: string; maxProxyAttempts: number },
+            ) =>
+                run("tg_agent_reserve_provision_retry_code", () =>
+                    retryReserveManualCode(params.reserveId, params.proxyRegion, params.maxProxyAttempts, log),
+                ),
+        });
+
+        // ── tg_agent_reserve_activate (триггер 2 — ручная активация) ──────
+
+        reg({
+            name: "tg_agent_reserve_activate",
+            description:
+                "Ручная активация аккаунта резерва: переводит выбранный workspace-reserve-<persona>-<K> в " +
+                "рабочий контур под новой меткой workspace-agent<N> (метка N присваивается в момент " +
+                "активации). Публичный канал/пост/персона НЕ трогаются (уже готовы в резерве) — только " +
+                "валидация подключением, атомарный claim, перекей записи инвайт-ссылки reserveId → agent<N> " +
+                "без вызовов Telegram, включение прогрева и посев переходов. Непригодный аккаунт уводится в " +
+                "карантин (account_invalid). Статус: done / account_invalid / skip / taken. Для надёжности " +
+                "предпочтителен detached-запуск через ops-скрипт (см. skills/tg-agent-reserve-activate).",
+            parameters: Type.Object({
+                reserveId: Type.String({ description: "id аккаунта резерва, например reserve-maria-3" }),
+            }),
+            execute: (_id: string, params: { reserveId: string }) =>
+                run("tg_agent_reserve_activate", async () => {
+                    const result = await runReserveActivate(params.reserveId, FUNNEL_ADMIN_AGENT_ID, log);
+                    return { text: renderActivateResult(result), ...result };
                 }),
         });
 

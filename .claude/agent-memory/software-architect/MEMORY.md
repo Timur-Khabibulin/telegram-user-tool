@@ -1,5 +1,7 @@
 # Memory Index
 
+- [Persona-account-reserve architecture](project_persona_account_reserve_architecture.md) — третий путь провижен-в-резерв + 2 триггера активации; имя `workspace-reserve-<persona>-<K>` даёт невидимость рабочему контуру БЕЗ правок перечислителей; инвайт-ссылка создаётся В скилле провиженинга (расходится с R4/AC-11), активация лишь перекеивает запись реестра reserveId→agentId без Telegram; validatePoolAccount переиспускается на reserveId как есть; R20 алерт пер-персонный
+
 - [tg-peer-identity-model architecture](project_tg_peer_identity_model.md) — access_hash валиден по таймстампам (session_authorized_at в tg-account.json); reacquire id-only (populatePeerCacheForIds, без ResolveUsername; username first-class только для join §3.6); commitSwap (не buildIncoming) стирает channels.db, AC-3 ок через реестр; membership=новое поле, R-1 dual-write (перевод потребителей — будущий change), should_leave остаётся в status; channelId=raw broadcast, chatId=marked peer
 - [Funnel v2 storage decision](project_funnel_v2_storage.md) — Q3/Q4 закрыты новыми таблицами `channel_visits`/`send_errors` в `tg-channels.db`, не в `funnel.db`
 - [Post-freshness-gate architecture](project_post_freshness_gate.md) — additive v2 skill via tasks-table toggle; lastProcessedAt is variant-unaware (hazard, coordinator declined a code guard)
