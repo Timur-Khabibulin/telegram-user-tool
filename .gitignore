@@ -11,6 +11,7 @@ yarn-error.log*
 .vscode/*
 
 /db
+/data
 /.idea
 local.properties
 /.claude/settings.local.json
@@ -20,3 +21,9 @@ local.properties
 key.txt
 google_sheets_key.json
 *.key.json
+
+# Рантайм-конфигурация и данные агентов — хранятся вне репозитория (на сервере)
+openclaw.json
+/persona/
+# Сессии Telegram Desktop
+tdata-*/

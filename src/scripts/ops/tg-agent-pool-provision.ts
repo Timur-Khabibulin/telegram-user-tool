@@ -53,7 +53,9 @@ async function main(): Promise<void> {
     // EnvironmentFile=/root/.openclaw/secrets.env). Env-путь безопаснее флага — секрет
     // не попадает в командную строку/journald/историю shell. Взаимоисключающ с
     // --two-fa-password-file (проверку делает runPoolProvision).
-    const twoFaPassword = parseArg(argv, "--two-fa-password") ?? process.env.TG_POOL_SOURCE_2FA;
+    // .trim() обязателен: хвостовой \r (Windows-перевод строки в источнике пароля) иначе
+    // попадёт в SRP-хеш — change2FA посчитает его по "pass\r" и упадёт PASSWORD_HASH_INVALID.
+    const twoFaPassword = (parseArg(argv, "--two-fa-password") ?? process.env.TG_POOL_SOURCE_2FA)?.trim();
     const twoFaPasswordFile = parseArg(argv, "--two-fa-password-file");
     const proxyRegion = parseArg(argv, "--proxy-region");
     const maxProxyAttempts = Number(parseArg(argv, "--max-proxy-attempts"));
